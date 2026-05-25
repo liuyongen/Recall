@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dist-electron/
+apps/desktop/dist/
+apps/desktop/dist-electron/
+apps/desktop/release/
+core/bin/
+*.db
+*.db-shm
+*.db-wal
+*.log
+docs/

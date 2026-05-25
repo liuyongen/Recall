@@ -1,0 +1,676 @@
+:root {
+  color-scheme: light dark;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  background: #fafafa;
+  color: #1a1a1a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 360px;
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+/* Layout */
+
+.shell {
+  display: grid;
+  grid-template-rows: auto;
+  height: auto;
+  background: #fafafa;
+}
+
+.shell.expanded {
+  grid-template-rows: auto 1fr;
+  height: 100vh;
+}
+
+/* Drag bar */
+
+.dragbar {
+  height: 10px;
+  -webkit-app-region: drag;
+}
+
+/* Search band */
+
+.searchBand {
+  padding: 0 18px 10px;
+  border-bottom: 1px solid #e8e8e8;
+}
+
+.shell.compact .searchBand {
+  border-bottom-color: transparent;
+}
+
+.searchRow {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 18px repeat(4, 32px);
+  gap: 9px;
+  align-items: center;
+  min-height: 60px;
+  padding: 0 6px 0 12px;
+  background: transparent;
+}
+
+.searchIcon {
+  color: #bbb;
+}
+
+.searchRow input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 24px;
+  font-weight: 400;
+  line-height: 1.2;
+}
+
+.searchRow input::placeholder {
+  color: #ccc;
+}
+
+/* Icon buttons */
+
+.iconButton {
+  display: inline-grid;
+  grid-auto-flow: column;
+  gap: 4px;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  color: #666;
+  background: transparent;
+  cursor: pointer;
+}
+
+.iconButton:hover,
+.iconButton.active {
+  background: #f0f0f0;
+  color: #1a1a1a;
+}
+
+.iconButton.ghost {
+  pointer-events: none;
+  visibility: hidden;
+}
+
+/* Filter row */
+
+.recallMeta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 24px;
+  padding: 0 4px 0 46px;
+  color: #999;
+  font-size: 12px;
+}
+
+.sourceSummary {
+  flex: 0 0 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: #777;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statusCluster {
+  display: inline-flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+  overflow: hidden;
+  color: #999;
+}
+
+.statusCluster span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.searchIndicator {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: #b6b6b6;
+}
+
+.searchIndicator.loading svg {
+  animation: spin 0.9s linear infinite;
+}
+
+.searchIndicator.error {
+  color: #c0392b;
+}
+
+.indexProgress {
+  display: grid;
+  width: min(360px, 100%);
+  min-width: 0;
+  gap: 3px;
+  color: #666;
+}
+
+.indexProgressTop {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.statusCluster .indexProgressTop span {
+  flex: 0 0 auto;
+  overflow: visible;
+  color: inherit;
+  text-overflow: clip;
+}
+
+.statusCluster .indexProgressTop .indexPhase {
+  color: #3a3a3a;
+  font-weight: 600;
+}
+
+.indexProgressBar {
+  justify-self: end;
+  width: 220px;
+  max-width: 100%;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 0;
+  background: #e6e6e6;
+}
+
+.indexProgressBar div {
+  height: 100%;
+  border-radius: 0;
+  background: #4f4f4f;
+  transition: width 180ms ease;
+}
+
+.indexProgressBar.pending div {
+  background: #9a9a9a;
+}
+
+.indexCurrent {
+  min-width: 0;
+  overflow: hidden;
+  color: #999;
+  font-size: 11px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sourcePanel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 4px 0 46px;
+}
+
+.filter {
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid #e4e4e4;
+  border-radius: 6px;
+  background: transparent;
+  color: #666;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.filter:hover {
+  border-color: #bbb;
+  color: #1a1a1a;
+}
+
+.filter.active {
+  border-color: #1a1a1a;
+  background: #1a1a1a;
+  color: #fff;
+}
+
+.working {
+  color: #b07c00;
+}
+
+.error {
+  color: #c0392b;
+}
+
+/* Results */
+
+.results {
+  overflow: auto;
+  padding: 8px 12px 18px;
+  overflow-anchor: none;
+}
+
+.resultStack {
+  animation: riseIn 140ms ease-out;
+}
+
+.resultCount {
+  padding: 2px 8px 8px;
+  color: #9a9a9a;
+  font-size: 12px;
+}
+
+.loadMoreWrap {
+  display: flex;
+  justify-content: center;
+  padding: 12px 0 4px;
+}
+
+.loadMoreButton {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid #e2e2e2;
+  border-radius: 8px;
+  background: #fff;
+  color: #666;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.loadMoreButton:hover {
+  border-color: #bbb;
+  color: #1a1a1a;
+}
+
+.result {
+  padding: 8px 10px;
+  border-radius: 6px;
+}
+
+.result + .result {
+  border-top: 1px solid #f0f0f0;
+}
+
+.result.selected {
+  background: #e5ebf6;
+  box-shadow: inset 0 0 0 1px #c3d0ea;
+}
+
+.result.selected + .result {
+  border-top-color: transparent;
+}
+
+.result.selected .resultTitle {
+  color: #10233f;
+}
+
+.result.selected p {
+  color: #475a75;
+}
+
+/* Result internals */
+
+.resultTop {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.resultActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.miniIconButton {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: #bbb;
+  cursor: pointer;
+}
+
+.miniIconButton:hover {
+  background: #ebebeb;
+  color: #1a1a1a;
+}
+
+.resultTitle {
+  overflow: hidden;
+  color: #1a1a1a;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sourcePill {
+  min-width: 40px;
+  padding: 2px 6px;
+  border: 1px solid #e8e8e8;
+  border-radius: 3px;
+  color: #999;
+  font-size: 10px;
+  text-align: center;
+}
+
+.result p {
+  display: -webkit-box;
+  margin: 3px 0 5px;
+  overflow: hidden;
+  color: #777;
+  font-size: 12px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+}
+
+.meta {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  overflow: hidden;
+  color: #bbb;
+  font-size: 11px;
+}
+
+.meta span,
+.meta button {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 3px;
+}
+
+.meta .path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pathButton {
+  max-width: min(460px, 68vw);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.pathButton:hover {
+  color: #1a1a1a;
+  text-decoration: underline;
+}
+
+/* Empty states */
+
+.memoryBlank {
+  display: grid;
+  min-height: 250px;
+  place-content: center;
+  justify-items: center;
+  gap: 9px;
+  color: #a5a5a5;
+  text-align: center;
+}
+
+.memoryBlank.compact {
+  min-height: 210px;
+}
+
+.memoryMark {
+  display: grid;
+  width: 52px;
+  height: 52px;
+  place-items: center;
+  border: 1px solid #eeeeee;
+  border-radius: 8px;
+  color: #b8b8b8;
+  background: #fff;
+}
+
+.memoryTitle {
+  color: #2a2a2a;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.memoryHint {
+  color: #aaa;
+  font-size: 13px;
+}
+
+@keyframes riseIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 520px) {
+  .searchBand {
+    padding: 0 12px 10px;
+  }
+
+  .searchRow {
+    grid-template-columns: 22px minmax(0, 1fr) 16px repeat(4, 28px);
+    gap: 6px;
+    min-height: 56px;
+    padding: 0 0 0 6px;
+  }
+
+  .searchRow input {
+    font-size: 22px;
+  }
+
+  .iconButton {
+    width: 28px;
+    height: 28px;
+  }
+
+  .recallMeta,
+  .sourcePanel {
+    padding-left: 34px;
+  }
+}
+
+/* Dark mode */
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    background: #141414;
+    color: #e8e8e8;
+  }
+
+  .shell {
+    background: #141414;
+  }
+
+  .searchBand {
+    border-bottom-color: #272727;
+  }
+
+  .searchRow {
+    border-color: #272727;
+    background: #1c1c1c;
+  }
+
+  .searchRow input::placeholder {
+    color: #444;
+  }
+
+  .searchIcon {
+    color: #555;
+  }
+
+  .iconButton {
+    color: #999;
+  }
+
+  .iconButton:hover {
+    background: #272727;
+    color: #e8e8e8;
+  }
+
+  .iconButton.active {
+    background: #272727;
+    color: #e8e8e8;
+  }
+
+  .filter {
+    border-color: #272727;
+    color: #888;
+  }
+
+  .filter:hover {
+    border-color: #555;
+    color: #e8e8e8;
+  }
+
+  .filter.active {
+    border-color: #e8e8e8;
+    background: #e8e8e8;
+    color: #141414;
+  }
+
+  .recallMeta,
+  .statusCluster {
+    color: #555;
+  }
+
+  .indexProgressBar {
+    background: #303030;
+  }
+
+  .indexProgressBar div {
+    background: #b8b8b8;
+  }
+
+  .indexProgressBar.pending div {
+    background: #777;
+  }
+
+  .statusCluster .indexProgressTop .indexPhase {
+    color: #d8d8d8;
+  }
+
+  .indexCurrent {
+    color: #666;
+  }
+
+  .sourceSummary {
+    color: #888;
+  }
+
+  .result + .result {
+    border-top-color: #222;
+  }
+
+  .result.selected {
+    background: #1c1c1c;
+  }
+
+  .resultTitle {
+    color: #e8e8e8;
+  }
+
+  .sourcePill {
+    border-color: #272727;
+    color: #555;
+  }
+
+  .result p {
+    color: #777;
+  }
+
+  .loadMoreButton {
+    border-color: #303030;
+    background: #1c1c1c;
+    color: #999;
+  }
+
+  .loadMoreButton:hover {
+    border-color: #555;
+    color: #e8e8e8;
+  }
+
+  .meta {
+    color: #444;
+  }
+
+  .miniIconButton {
+    color: #444;
+  }
+
+  .miniIconButton:hover {
+    background: #272727;
+    color: #e8e8e8;
+  }
+
+  .pathButton:hover {
+    color: #e8e8e8;
+  }
+
+  .memoryMark {
+    border-color: #252525;
+    background: #191919;
+    color: #555;
+  }
+
+  .memoryTitle {
+    color: #e8e8e8;
+  }
+
+  .memoryHint {
+    color: #666;
+  }
+}

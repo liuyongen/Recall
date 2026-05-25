@@ -1,0 +1,18 @@
+{
+  "name": "recall-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/desktop"
+  ],
+  "scripts": {
+    "start": "npm run build:core && npm run dev",
+    "dev": "npm --workspace apps/desktop run dev",
+    "build": "npm run build:core && npm --workspace apps/desktop run build",
+    "build:desktop": "npm --workspace apps/desktop run build",
+    "build:core": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-core.ps1",
+    "typecheck": "npm --workspace apps/desktop run typecheck",
+    "test:core": "cd core && go test ./...",
+    "dist": "npm run build:core && npm --workspace apps/desktop run dist"
+  }
+}

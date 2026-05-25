@@ -1,0 +1,688 @@
+import {
+  AlertCircle,
+  Clock,
+  ExternalLink,
+  FilePlus2,
+  FolderOpen,
+  Globe,
+  HardDrive,
+  Loader2,
+  Search,
+  SlidersHorizontal,
+  X
+} from 'lucide-react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+
+type SearchResult = {
+  rowid: number;
+  item_id: string;
+  source: string;
+  title: string;
+  preview: string;
+  path?: string;
+  file_type?: string;
+  updated_at: number;
+  score: number;
+  metadata?: Record<string, unknown>;
+};
+
+function getUrl(result: SearchResult): string | undefined {
+  return result.metadata?.url as string | undefined;
+}
+
+type SearchResponse = {
+  query: string;
+  elapsed_ms: number;
+  total: number;
+  results: SearchResult[];
+  has_more?: boolean;
+};
+
+type Status = {
+  kind: 'idle' | 'working' | 'error';
+  text: string;
+};
+
+type IndexProgress = {
+  active: boolean;
+  phase: string;
+  path?: string;
+  current?: string;
+  total: number;
+  scanned: number;
+  indexed: number;
+  skipped: number;
+  written: number;
+  workers: number;
+  files_per_sec: number;
+  eta_ms: number;
+  elapsed_ms: number;
+  last_error?: string;
+};
+
+const sourceLabels: Record<string, string> = {
+  file: '文件',
+  chrome: 'Chrome',
+  edge: 'Edge',
+  firefox: 'Firefox'
+};
+
+export function App() {
+  const PAGE_SIZE = 50;
+
+  const api = window.phantasm;
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<SearchResult[]>([]);
+  const [hasMore, setHasMore] = useState(false);
+  const [elapsed, setElapsed] = useState<number | null>(null);
+  const [selected, setSelected] = useState(0);
+  const [source, setSource] = useState('');
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [status, setStatus] = useState<Status>({ kind: 'idle', text: '' });
+  const [indexProgress, setIndexProgress] = useState<IndexProgress | null>(null);
+  const [indexing, setIndexing] = useState(false);
+  const [searching, setSearching] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const searchBandRef = useRef<HTMLElement>(null);
+  const resultsRef = useRef<HTMLElement>(null);
+  const resultsContentRef = useRef<HTMLDivElement>(null);
+  const resultItemRefs = useRef<Array<HTMLElement | null>>([]);
+  const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const shouldResetResultsScrollRef = useRef(false);
+
+  function setStatusAuto(s: Status) {
+    setStatus(s);
+    if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
+    if (s.kind === 'idle' && s.text) {
+      statusTimerRef.current = setTimeout(() => setStatus({ kind: 'idle', text: '' }), 3000);
+    }
+  }
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    if (!api || !indexing) {
+      return;
+    }
+
+    let cancelled = false;
+    async function pollProgress() {
+      try {
+        const progress = await api?.indexProgress() as IndexProgress;
+        if (!cancelled) {
+          setIndexProgress((previous) => {
+            if (progress.active) {
+              return progress;
+            }
+            if (previous?.active) {
+              return previous;
+            }
+            return progress;
+          });
+        }
+      } catch {
+        // Progress is best-effort; indexPath still owns completion/errors.
+      }
+    }
+
+    void pollProgress();
+    const timer = window.setInterval(() => void pollProgress(), 300);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [api, indexing]);
+
+  useEffect(() => {
+    if (!api) {
+      setStatus({ kind: 'error', text: '请在 Electron 客户端中使用搜索' });
+      return;
+    }
+
+    const trimmed = query.trim();
+    if (!trimmed) {
+      setResults([]);
+      setHasMore(false);
+      setElapsed(null);
+      setSearching(false);
+      setSelected(0);
+      if (resultsRef.current) {
+        resultsRef.current.scrollTop = 0;
+      }
+      return;
+    }
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setSearching(true);
+      try {
+        const response = (await api.search({
+          query: trimmed,
+          source,
+          limit: PAGE_SIZE,
+          offset: 0
+        })) as SearchResponse;
+        if (controller.signal.aborted) {
+          return;
+        }
+        shouldResetResultsScrollRef.current = true;
+        setResults(response.results ?? []);
+        setHasMore(Boolean(response.has_more));
+        setElapsed(response.elapsed_ms);
+        setSelected(0);
+        if (resultsRef.current) {
+          resultsRef.current.scrollTop = 0;
+        }
+        setStatus({ kind: 'idle', text: '' });
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          setStatus({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setSearching(false);
+        }
+      }
+    }, 45);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+      setSearching(false);
+    };
+  }, [api, query, source]);
+
+  const activeResult = results[selected];
+
+  useEffect(() => {
+    resultItemRefs.current.length = results.length;
+  }, [results.length]);
+
+  useEffect(() => {
+    if (results.length === 0) {
+      if (selected !== 0) {
+        setSelected(0);
+      }
+      return;
+    }
+    if (selected >= results.length) {
+      setSelected(results.length - 1);
+    }
+  }, [selected, results.length]);
+
+  const sourceOptions = useMemo(() => ['', 'file', 'chrome', 'edge', 'firefox'], []);
+  const trimmedQuery = query.trim();
+  const hasQuery = Boolean(trimmedQuery);
+  const showSourcePanel = filtersOpen || Boolean(source);
+  const hasResults = hasQuery && results.length > 0;
+  const showSearchLoading = searching && hasQuery;
+  const showSearchError = status.kind === 'error' && Boolean(status.text);
+  const visibleIndexProgress = indexProgress && (indexProgress.active || indexing) && indexProgress.phase !== 'idle'
+    ? indexProgress
+    : null;
+  const showMeta = Boolean(source) || Boolean(status.text) || Boolean(visibleIndexProgress) || (elapsed !== null && hasResults);
+  const showResults = hasResults;
+
+  useLayoutEffect(() => {
+    if (!resultsRef.current) {
+      return;
+    }
+    if (!shouldResetResultsScrollRef.current) {
+      return;
+    }
+    resultsRef.current.scrollTop = 0;
+    shouldResetResultsScrollRef.current = false;
+  }, [results]);
+
+  useLayoutEffect(() => {
+    if (!showResults || !resultsRef.current) {
+      return;
+    }
+    const container = resultsRef.current;
+    if (selected === 0) {
+      container.scrollTop = 0;
+      return;
+    }
+    const selectedNode = resultItemRefs.current[selected];
+    if (!selectedNode) {
+      return;
+    }
+
+    ensureElementFullyVisible(container, selectedNode, 12);
+  }, [selected, showResults]);
+
+  useLayoutEffect(() => {
+    const searchHeight = searchBandRef.current?.scrollHeight ?? 82;
+    const resultsHeight = showResults
+      ? getResultsHeight(resultsRef.current, resultsContentRef.current)
+      : 0;
+    const maxResultsHeight = 356;
+    const targetHeight = Math.ceil(searchHeight + Math.min(resultsHeight, maxResultsHeight));
+
+    void api?.setWindowHeight(targetHeight);
+  }, [api, query, results.length, elapsed, source, filtersOpen, status.text, showResults, indexProgress, indexing]);
+
+  async function loadMoreResults() {
+    if (!api || searching || !hasMore) {
+      return;
+    }
+    const trimmed = query.trim();
+    if (!trimmed) {
+      return;
+    }
+    setSearching(true);
+    try {
+      const response = (await api.search({
+        query: trimmed,
+        source,
+        limit: PAGE_SIZE,
+        offset: results.length
+      })) as SearchResponse;
+      const next = response.results ?? [];
+      if (next.length > 0) {
+        setResults((previous) => {
+          const seen = new Set(previous.map((item) => `${item.source}:${item.item_id}:${item.rowid}`));
+          const merged = previous.slice();
+          for (const item of next) {
+            const key = `${item.source}:${item.item_id}:${item.rowid}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              merged.push(item);
+            }
+          }
+          return merged;
+        });
+      }
+      setHasMore(Boolean(response.has_more));
+      setElapsed(response.elapsed_ms);
+      setStatus({ kind: 'idle', text: '' });
+    } catch (error) {
+      setStatus({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setSearching(false);
+      inputRef.current?.focus();
+    }
+  }
+
+  async function indexFolder() {
+    if (!api) {
+      setStatusAuto({ kind: 'error', text: '请在 Electron 客户端中使用索引' });
+      return;
+    }
+    const folder = await api.chooseFolder();
+    if (!folder) {
+      return;
+    }
+    setIndexing(true);
+    setIndexProgress({
+      active: true,
+      phase: 'starting',
+      path: folder,
+      total: 0,
+      scanned: 0,
+      indexed: 0,
+      skipped: 0,
+      written: 0,
+      workers: 0,
+      files_per_sec: 0,
+      eta_ms: 0,
+      elapsed_ms: 0
+    });
+    setStatus({ kind: 'working', text: '正在索引' });
+    try {
+      const res = await api.indexPath({ path: folder }) as { indexed?: number };
+      const count = res?.indexed ?? 0;
+      const finalProgress = await api.indexProgress().catch(() => null) as IndexProgress | null;
+      if (finalProgress) {
+        setIndexProgress(finalProgress);
+      }
+      setStatusAuto({ kind: 'idle', text: `索引完成，共 ${count} 个文件` });
+    } catch (error) {
+      setStatusAuto({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setIndexing(false);
+    }
+  }
+
+  async function syncBrowsers() {
+    if (!api) {
+      setStatusAuto({ kind: 'error', text: '请在 Electron 客户端中同步浏览器' });
+      return;
+    }
+    setStatus({ kind: 'working', text: '正在同步' });
+    try {
+      await api.syncBrowsers();
+      setStatusAuto({ kind: 'idle', text: '同步完成' });
+    } catch (error) {
+      setStatusAuto({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  function handleKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      if (!results.length) return;
+      setSelected((value) => Math.min(value + 1, results.length - 1));
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (!results.length) return;
+      setSelected((value) => Math.max(value - 1, 0));
+    }
+    if (event.key === 'Enter' && activeResult) {
+      const url = getUrl(activeResult);
+      if (activeResult.path) {
+        if (event.shiftKey) {
+          void api?.showItemInFolder(activeResult.path);
+          return;
+        }
+        void api?.openPath(activeResult.path);
+      } else if (url) {
+        void api?.openUrl(url);
+      }
+    }
+    if (event.key === 'Escape') {
+      setQuery('');
+      void api?.hide();
+    }
+  }
+
+  return (
+    <main className={showResults || showSourcePanel || showMeta ? 'shell expanded' : 'shell compact'}>
+      <section className="searchBand" ref={searchBandRef}>
+        <div className="dragbar" />
+        <div className="searchRow">
+          <Search className="searchIcon" size={22} aria-hidden="true" />
+          <input
+            ref={inputRef}
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="搜索本地记忆"
+            spellCheck={false}
+          />
+          <div
+            className={showSearchError ? 'searchIndicator error' : showSearchLoading ? 'searchIndicator loading' : 'searchIndicator'}
+            title={showSearchError ? status.text : showSearchLoading ? '搜索中' : ''}
+            aria-live="polite"
+          >
+            {showSearchLoading ? <Loader2 size={13} /> : null}
+            {showSearchError ? <AlertCircle size={13} /> : null}
+          </div>
+          <button
+            className={query ? 'iconButton' : 'iconButton ghost'}
+            title="清空"
+            tabIndex={query ? 0 : -1}
+            aria-hidden={!query}
+            onClick={() => setQuery('')}
+          >
+            <X size={18} />
+          </button>
+          <button
+            className={source || filtersOpen ? 'iconButton active' : 'iconButton'}
+            title="筛选来源"
+            aria-expanded={showSourcePanel}
+            onClick={() => setFiltersOpen((open) => !open)}
+          >
+            <SlidersHorizontal size={18} />
+          </button>
+          <button className="iconButton" title="索引文件夹" onClick={indexFolder}>
+            <FolderOpen size={18} />
+          </button>
+          <button className="iconButton" title="同步浏览器" onClick={syncBrowsers}>
+            <Globe size={18} />
+          </button>
+        </div>
+        {showMeta ? (
+          <div className="recallMeta">
+            <div className="sourceSummary">
+              {source ? sourceLabels[source] : ''}
+            </div>
+            <div className="statusCluster">
+              {visibleIndexProgress ? (
+                <IndexProgressView progress={visibleIndexProgress} />
+              ) : status.text ? (
+                <span className={status.kind}>{status.text}</span>
+              ) : null}
+              {elapsed !== null && (hasResults || hasQuery) ? <span>{elapsed.toFixed(1)} ms</span> : null}
+            </div>
+          </div>
+        ) : null}
+        {showSourcePanel ? (
+          <div className="sourcePanel" role="group" aria-label="来源筛选">
+            {sourceOptions.map((option) => (
+              <button
+                key={option || 'all'}
+                className={source === option ? 'filter active' : 'filter'}
+                aria-pressed={source === option}
+                onClick={() => {
+                  setSource(option);
+                  setFiltersOpen(false);
+                }}
+              >
+                {option ? sourceLabels[option] : '全部'}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </section>
+
+      {showResults ? (
+        <section className="results" ref={resultsRef} aria-live="polite">
+          <div className="resultStack" ref={resultsContentRef}>
+            <div className="resultCount">
+              已加载 {results.length} 条
+            </div>
+            {results.map((result, index) => (
+              <article
+                key={`${result.source}-${result.item_id}-${result.rowid}`}
+                className={index === selected ? 'result selected' : 'result'}
+                ref={(node) => {
+                  resultItemRefs.current[index] = node;
+                }}
+                onClick={() => setSelected(index)}
+                onDoubleClick={() => openResult(result)}
+              >
+                <div className="resultTop">
+                  <div className="resultTitle">{result.title || result.item_id}</div>
+                  <div className="resultActions">
+                    {result.path ? (
+                      <>
+                        <button
+                          className="miniIconButton"
+                          title="打开文件"
+                          onClick={() => openResult(result)}
+                        >
+                          <ExternalLink size={14} />
+                        </button>
+                        <button
+                          className="miniIconButton"
+                          title="在文件夹中显示"
+                          onClick={() => showResultInFolder(result)}
+                        >
+                          <FolderOpen size={14} />
+                        </button>
+                      </>
+                    ) : getUrl(result) ? (
+                      <button
+                        className="miniIconButton"
+                        title="在浏览器中打开"
+                        onClick={() => { const u = getUrl(result); if (u) void window.phantasm?.openUrl(u); }}
+                      >
+                        <ExternalLink size={14} />
+                      </button>
+                    ) : null}
+                    <div className="sourcePill">{sourceLabels[result.source] ?? result.source}</div>
+                  </div>
+                </div>
+                <p>{result.preview}</p>
+                <div className="meta">
+                  <span>
+                    <Clock size={13} />
+                    {formatTime(result.updated_at)}
+                  </span>
+                  {result.path ? (
+                    <button className="path pathButton" title="在文件夹中显示" onClick={() => showResultInFolder(result)}>
+                      <HardDrive size={13} />
+                      {result.path}
+                    </button>
+                  ) : getUrl(result) ? (
+                    <button className="path pathButton" title="在浏览器中打开" onClick={() => { const u = getUrl(result); if (u) void window.phantasm?.openUrl(u); }}>
+                      <ExternalLink size={13} />
+                      {getUrl(result)}
+                    </button>
+                  ) : null}
+                  {result.file_type ? (
+                    <span>
+                      <FilePlus2 size={13} />
+                      {result.file_type}
+                    </span>
+                  ) : null}
+                </div>
+              </article>
+            ))}
+            {hasMore ? (
+              <div className="loadMoreWrap">
+                <button
+                  className="loadMoreButton"
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => void loadMoreResults()}
+                >
+                  {searching ? '加载中...' : '加载更多'}
+                </button>
+              </div>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
+    </main>
+  );
+}
+
+function openResult(result: SearchResult) {
+  if (result.path) {
+    void window.phantasm?.openPath(result.path);
+  } else {
+    const url = getUrl(result);
+    if (url) void window.phantasm?.openUrl(url);
+  }
+}
+
+function showResultInFolder(result: SearchResult) {
+  if (result.path) {
+    void window.phantasm?.showItemInFolder(result.path);
+  }
+}
+
+function getResultsHeight(results: HTMLElement | null, content: HTMLElement | null) {
+  if (!results || !content) {
+    return 0;
+  }
+  const style = window.getComputedStyle(results);
+  const paddingTop = Number.parseFloat(style.paddingTop) || 0;
+  const paddingBottom = Number.parseFloat(style.paddingBottom) || 0;
+  return content.scrollHeight + paddingTop + paddingBottom;
+}
+
+function ensureElementFullyVisible(container: HTMLElement, item: HTMLElement, padding = 0) {
+  const itemTop = containerRelativeTop(container, item);
+  const itemBottom = itemTop + item.offsetHeight;
+  const visibleTop = container.scrollTop + padding;
+  const visibleBottom = container.scrollTop + container.clientHeight - padding;
+  const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+
+  if (itemTop < visibleTop) {
+    container.scrollTop = Math.max(0, itemTop - padding);
+    return;
+  }
+  if (itemBottom > visibleBottom) {
+    const next = itemBottom - container.clientHeight + padding;
+    container.scrollTop = Math.min(maxScrollTop, Math.max(0, next));
+  }
+}
+
+function containerRelativeTop(container: HTMLElement, item: HTMLElement) {
+  const containerRect = container.getBoundingClientRect();
+  const itemRect = item.getBoundingClientRect();
+  return itemRect.top - containerRect.top + container.scrollTop;
+}
+
+function formatTime(unixSeconds: number) {
+  if (!unixSeconds) {
+    return '';
+  }
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  }).format(new Date(unixSeconds * 1000));
+}
+
+function formatIndexProgress(progress: IndexProgress) {
+  const phaseLabels: Record<string, string> = {
+    starting: '准备索引',
+    scanning: '扫描文件',
+    extracting: '抽取文本',
+    writing: '写入索引',
+    idle: '索引完成'
+  };
+  const total = progress.total > 0 ? `/${progress.total}` : '';
+  const speed = progress.files_per_sec > 0 ? ` · ${progress.files_per_sec.toFixed(1)} 文件/秒` : '';
+  const eta = progress.eta_ms > 0 ? ` · ETA ${formatDuration(progress.eta_ms)}` : '';
+  const workers = progress.workers > 0 ? ` · ${progress.workers} workers` : '';
+  const current = progress.current ? ` · ${basename(progress.current)}` : '';
+  return `${phaseLabels[progress.phase] ?? '正在索引'} · ${progress.scanned}${total} · 写入 ${progress.written} · 跳过 ${progress.skipped}${speed}${eta}${workers}${current}`;
+}
+
+function IndexProgressView({ progress }: { progress: IndexProgress }) {
+  const total = progress.total > 0 ? progress.total : 0;
+  const scanned = Math.max(0, progress.scanned);
+  const ratio = total > 0 ? Math.min(1, scanned / total) : null;
+  const percent = ratio === null ? null : Math.round(ratio * 100);
+  const phase = progressPhaseLabel(progress.phase);
+  const current = progress.current ? basename(progress.current) : '';
+  return (
+    <div className="indexProgress" title={formatIndexProgress(progress)}>
+      <div className="indexProgressTop">
+        <span className="indexPhase">{phase}</span>
+        <span>{total > 0 ? `${scanned}/${total}` : `已扫描 ${scanned}`}</span>
+        {percent !== null ? <span>{percent}%</span> : null}
+        {progress.files_per_sec > 0 ? <span>{progress.files_per_sec.toFixed(1)} 文件/秒</span> : null}
+        {progress.eta_ms > 0 ? <span>ETA {formatDuration(progress.eta_ms)}</span> : null}
+      </div>
+      <div className={ratio === null ? 'indexProgressBar pending' : 'indexProgressBar'} aria-hidden="true">
+        <div style={{ width: ratio === null ? '28%' : `${Math.max(2, ratio * 100)}%` }} />
+      </div>
+      {current ? <div className="indexCurrent">{current}</div> : null}
+    </div>
+  );
+}
+
+function progressPhaseLabel(phase: string) {
+  const phaseLabels: Record<string, string> = {
+    starting: '准备索引',
+    scanning: '扫描文件',
+    extracting: '抽取文本',
+    writing: '写入索引',
+    idle: '索引完成'
+  };
+  return phaseLabels[phase] ?? '正在索引';
+}
+
+function basename(path: string) {
+  const normalized = path.replace(/\\/g, '/');
+  return normalized.slice(normalized.lastIndexOf('/') + 1);
+}
+
+function formatDuration(ms: number) {
+  const seconds = Math.max(1, Math.round(ms / 1000));
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return rest ? `${minutes}m${rest}s` : `${minutes}m`;
+}
