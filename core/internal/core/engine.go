@@ -43,6 +43,7 @@ type Engine struct {
 	indexMu        sync.Mutex
 	runMu          sync.Mutex
 	indexRunCancel context.CancelFunc
+	syncRunCancel  context.CancelFunc
 	progressMu     sync.RWMutex
 	progress       model.IndexProgress
 	// file watching
@@ -218,23 +219,43 @@ func (e *Engine) CancelIndexPath(ctx context.Context) (map[string]any, error) {
 func (e *Engine) SyncBrowsers(ctx context.Context) ([]model.SyncSummary, error) {
 	e.indexMu.Lock()
 	defer e.indexMu.Unlock()
+	runCtx, cancel := context.WithCancel(ctx)
+	e.setSyncRunCancel(cancel)
+	defer e.setSyncRunCancel(nil)
+	defer cancel()
 
 	summaries := make([]model.SyncSummary, 0, len(e.browsers))
 	for _, adapter := range e.browsers {
+		if err := runCtx.Err(); err != nil {
+			return summaries, err
+		}
 		if !adapter.IsAvailable() {
 			continue
 		}
-		lastSync, err := e.store.GetSyncTime(ctx, adapter.ID())
+		lastSync, err := e.store.GetSyncTime(runCtx, adapter.ID())
 		if err != nil {
 			return summaries, err
 		}
-		summary, err := e.syncAdapter(ctx, adapter, lastSync)
+		summary, err := e.syncAdapter(runCtx, adapter, lastSync)
 		if err != nil {
 			return summaries, err
 		}
 		summaries = append(summaries, summary)
 	}
 	return summaries, nil
+}
+
+// CancelSyncBrowsers cancels the active sync_browsers request if one is running.
+func (e *Engine) CancelSyncBrowsers(ctx context.Context) (map[string]any, error) {
+	_ = ctx
+	e.runMu.Lock()
+	cancel := e.syncRunCancel
+	e.runMu.Unlock()
+	if cancel == nil {
+		return map[string]any{"ok": true, "canceled": false}, nil
+	}
+	cancel()
+	return map[string]any{"ok": true, "canceled": true}, nil
 }
 
 // Optimize runs SQLite maintenance.
@@ -859,6 +880,12 @@ func (e *Engine) setIndexRunCancel(cancel context.CancelFunc) {
 	e.runMu.Lock()
 	defer e.runMu.Unlock()
 	e.indexRunCancel = cancel
+}
+
+func (e *Engine) setSyncRunCancel(cancel context.CancelFunc) {
+	e.runMu.Lock()
+	defer e.runMu.Unlock()
+	e.syncRunCancel = cancel
 }
 
 // enableWatch persists the path and registers it with the fsnotify watcher.

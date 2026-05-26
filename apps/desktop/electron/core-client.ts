@@ -20,7 +20,7 @@ type CoreResponse = {
 const SEARCH_TIMEOUT_MS = 120_000;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const INDEX_TIMEOUT_MS = 0;
-const SYNC_TIMEOUT_MS = 2 * 60 * 1000;
+const SYNC_TIMEOUT_MS = 0;
 
 let coreProcess: ChildProcessWithoutNullStreams | null = null;
 let nextID = 1;

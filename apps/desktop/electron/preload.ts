@@ -5,6 +5,7 @@ const api = {
   search: (params: SearchParams) => ipcRenderer.invoke('core:search', params),
   indexPath: (params: IndexPathParams) => ipcRenderer.invoke('core:indexPath', params),
   cancelIndex: () => ipcRenderer.invoke('core:cancelIndex'),
+  cancelSyncBrowsers: () => ipcRenderer.invoke('core:cancelSyncBrowsers'),
   indexProgress: () => ipcRenderer.invoke('core:indexProgress'),
   syncBrowsers: () => ipcRenderer.invoke('core:syncBrowsers'),
   chooseFolder: () => ipcRenderer.invoke('app:chooseFolder'),

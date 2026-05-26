@@ -157,6 +157,7 @@ function registerIpc(): void {
   ipcMain.handle('core:health', () => requestCore('health'));
   ipcMain.handle('core:search', (_event, params) => requestCore('search', params));
   ipcMain.handle('core:syncBrowsers', () => requestCore('sync_browsers'));
+  ipcMain.handle('core:cancelSyncBrowsers', () => requestCore('cancel_sync_browsers'));
   ipcMain.handle('core:indexPath', (_event, params) => requestCore('index_path', params));
   ipcMain.handle('core:cancelIndex', () => requestCore('cancel_index'));
   ipcMain.handle('core:indexProgress', () => requestCore('index_progress'));

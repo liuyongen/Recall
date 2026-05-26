@@ -67,6 +67,9 @@ func registerHandlers(server *protocol.Server, engine *core.Engine) {
 	server.Handle("sync_browsers", func(ctx context.Context, raw json.RawMessage) (any, error) {
 		return engine.SyncBrowsers(ctx)
 	})
+	server.Handle("cancel_sync_browsers", func(ctx context.Context, raw json.RawMessage) (any, error) {
+		return engine.CancelSyncBrowsers(ctx)
+	})
 
 	server.Handle("optimize", func(ctx context.Context, raw json.RawMessage) (any, error) {
 		return engine.Optimize(ctx)

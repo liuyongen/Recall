@@ -140,7 +140,7 @@ func timeoutFor(method string) time.Duration {
 	case "index_path":
 		return 0
 	case "sync_browsers":
-		return 2 * time.Minute
+		return 0
 	default:
 		return 5 * time.Second
 	}

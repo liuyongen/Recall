@@ -113,6 +113,16 @@ input {
   visibility: hidden;
 }
 
+.iconButton:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.iconButton:disabled:hover {
+  background: transparent;
+  color: inherit;
+}
+
 /* Filter row */
 
 .recallMeta {

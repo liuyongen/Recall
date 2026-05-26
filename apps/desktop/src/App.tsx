@@ -83,6 +83,7 @@ export function App() {
   const [indexProgress, setIndexProgress] = useState<IndexProgress | null>(null);
   const [indexing, setIndexing] = useState(false);
   const [cancellingIndex, setCancellingIndex] = useState(false);
+  const [syncingBrowsers, setSyncingBrowsers] = useState(false);
   const [searching, setSearching] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const searchBandRef = useRef<HTMLElement>(null);
@@ -305,6 +306,9 @@ export function App() {
       setStatusAuto({ kind: 'error', text: '请在 Electron 客户端中使用索引' });
       return;
     }
+    if (syncingBrowsers) {
+      return;
+    }
     const folder = await api.chooseFolder();
     if (!folder) {
       return;
@@ -372,10 +376,33 @@ export function App() {
       setStatusAuto({ kind: 'error', text: '请在 Electron 客户端中同步浏览器' });
       return;
     }
-    setStatus({ kind: 'working', text: '正在同步' });
+    if (indexing || cancellingIndex || syncingBrowsers) {
+      return;
+    }
+    setSyncingBrowsers(true);
+    setStatus({ kind: 'working', text: '正在同步浏览器...' });
     try {
       await api.syncBrowsers();
       setStatusAuto({ kind: 'idle', text: '同步完成' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isIndexCanceledError(message)) {
+        setStatusAuto({ kind: 'idle', text: '浏览器同步已取消' });
+      } else {
+        setStatusAuto({ kind: 'error', text: message });
+      }
+    } finally {
+      setSyncingBrowsers(false);
+    }
+  }
+
+  async function cancelSyncBrowsers() {
+    if (!api || !syncingBrowsers) {
+      return;
+    }
+    setStatus({ kind: 'working', text: '正在取消浏览器同步...' });
+    try {
+      await api.cancelSyncBrowsers();
     } catch (error) {
       setStatusAuto({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
     }
@@ -451,7 +478,8 @@ export function App() {
           </button>
           <button
             className={indexing ? 'iconButton active' : 'iconButton'}
-            title={indexing ? (cancellingIndex ? '正在取消索引' : '取消索引') : '索引文件夹'}
+            title={syncingBrowsers ? '浏览器同步进行中，暂不可索引' : indexing ? (cancellingIndex ? '正在取消索引' : '取消索引') : '索引文件夹'}
+            disabled={syncingBrowsers}
             onClick={() => {
               if (indexing) {
                 void cancelIndexing();
@@ -464,8 +492,19 @@ export function App() {
               ? (cancellingIndex ? <Loader2 size={18} className="spinIcon" /> : <Square size={16} />)
               : <FolderOpen size={18} />}
           </button>
-          <button className="iconButton" title="同步浏览器" onClick={syncBrowsers}>
-            <Globe size={18} />
+          <button
+            className={syncingBrowsers ? 'iconButton active' : 'iconButton'}
+            title={indexing ? '索引进行中，暂不可同步浏览器' : syncingBrowsers ? '取消浏览器同步' : '同步浏览器'}
+            disabled={indexing || cancellingIndex}
+            onClick={() => {
+              if (syncingBrowsers) {
+                void cancelSyncBrowsers();
+                return;
+              }
+              void syncBrowsers();
+            }}
+          >
+            {syncingBrowsers ? <Square size={16} /> : <Globe size={18} />}
           </button>
         </div>
         {showMeta ? (
