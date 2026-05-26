@@ -105,7 +105,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!api || !indexing) {
+    if (!api || !indexing || cancellingIndex) {
       return;
     }
 
@@ -114,15 +114,7 @@ export function App() {
       try {
         const progress = await api?.indexProgress() as IndexProgress;
         if (!cancelled) {
-          setIndexProgress((previous) => {
-            if (progress.active) {
-              return progress;
-            }
-            if (previous?.active) {
-              return previous;
-            }
-            return progress;
-          });
+          setIndexProgress(progress);
         }
       } catch {
         // Progress is best-effort; indexPath still owns completion/errors.
@@ -135,7 +127,7 @@ export function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [api, indexing]);
+  }, [api, indexing, cancellingIndex]);
 
   useEffect(() => {
     if (!api) {
@@ -221,7 +213,7 @@ export function App() {
   const hasResults = hasQuery && results.length > 0;
   const showSearchLoading = searching && hasQuery;
   const showSearchError = status.kind === 'error' && Boolean(status.text);
-  const visibleIndexProgress = indexProgress && (indexProgress.active || indexing) && indexProgress.phase !== 'idle'
+  const visibleIndexProgress = indexProgress && !cancellingIndex && (indexProgress.active || indexing) && indexProgress.phase !== 'idle'
     ? indexProgress
     : null;
   const showMeta = Boolean(source) || Boolean(status.text) || Boolean(visibleIndexProgress) || (elapsed !== null && hasResults);
@@ -334,7 +326,12 @@ export function App() {
     });
     setStatus({ kind: 'working', text: '正在索引' });
     try {
-      const res = await api.indexPath({ path: folder }) as { indexed?: number };
+      const res = await api.indexPath({ path: folder }) as { indexed?: number; canceled?: boolean };
+      if (res?.canceled) {
+        setIndexProgress(null);
+        setStatusAuto({ kind: 'idle', text: '索引已取消' });
+        return;
+      }
       const count = res?.indexed ?? 0;
       const finalProgress = await api.indexProgress().catch(() => null) as IndexProgress | null;
       if (finalProgress) {
@@ -344,6 +341,7 @@ export function App() {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (isIndexCanceledError(message)) {
+        setIndexProgress(null);
         setStatusAuto({ kind: 'idle', text: '索引已取消' });
       } else {
         setStatusAuto({ kind: 'error', text: message });
@@ -359,6 +357,7 @@ export function App() {
       return;
     }
     setCancellingIndex(true);
+    setIndexProgress(null);
     setStatus({ kind: 'working', text: '正在取消索引...' });
     try {
       await api.cancelIndex();

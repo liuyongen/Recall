@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline';
 import path from 'node:path';
 
 type PendingRequest = {
+  method: string;
   resolve: (value: unknown) => void;
   reject: (reason?: unknown) => void;
   timer?: NodeJS.Timeout;
@@ -111,6 +112,7 @@ export function requestCore<T>(
       : undefined;
 
     pending.set(id, {
+      method,
       resolve: (value) => resolve(value as T),
       reject,
       timer
@@ -166,11 +168,20 @@ function handleCoreLine(line: string): void {
   pending.delete(response.id);
 
   if (response.error) {
+    if (request.method === 'index_path' && isContextCanceled(response.error.message)) {
+      request.resolve({ canceled: true });
+      return;
+    }
     request.reject(new Error(response.error.message));
     return;
   }
 
   request.resolve(response.result);
+}
+
+function isContextCanceled(message: string): boolean {
+  const lower = message.toLowerCase();
+  return lower.includes('context canceled') || lower.includes('context cancelled');
 }
 
 function rejectPending(reason: Error): void {

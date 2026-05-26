@@ -210,6 +210,7 @@ func (e *Engine) CancelIndexPath(ctx context.Context) (map[string]any, error) {
 		return map[string]any{"ok": true, "canceled": false}, nil
 	}
 	cancel()
+	e.markProgressCanceled()
 	return map[string]any{"ok": true, "canceled": true}, nil
 }
 
@@ -817,6 +818,24 @@ func (e *Engine) finishProgress(summary model.SyncSummary, err error) {
 	} else {
 		e.progress.LastError = ""
 	}
+}
+
+func (e *Engine) markProgressCanceled() {
+	now := time.Now()
+	e.progressMu.Lock()
+	defer e.progressMu.Unlock()
+	if !e.progress.Active {
+		return
+	}
+	e.progress.Active = false
+	e.progress.Phase = "idle"
+	e.progress.Current = ""
+	e.progress.EtaMS = 0
+	e.progress.UpdatedAt = now.UnixMilli()
+	if e.progress.StartedAt > 0 {
+		e.progress.ElapsedMS = float64(now.UnixMilli() - e.progress.StartedAt)
+	}
+	e.progress.LastError = context.Canceled.Error()
 }
 
 func (e *Engine) refreshProgressLocked(now time.Time) {

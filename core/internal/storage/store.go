@@ -306,6 +306,9 @@ ON CONFLICT(adapter_id) DO UPDATE SET
 func (s *Store) LoadFileFingerprints(ctx context.Context, roots []string) (map[string]FileFingerprint, error) {
 	fingerprints := make(map[string]FileFingerprint)
 	for _, root := range roots {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		normalizedRoot := normalizeFingerprintPath(root)
 		likeRoot := strings.TrimRight(filepath.ToSlash(normalizedRoot), "/") + "/%"
 		rows, err := s.db.QueryContext(ctx, `
@@ -322,6 +325,10 @@ WHERE path = ? OR path LIKE ?`, normalizedRoot, likeRoot)
 				return nil, err
 			}
 			fingerprints[fp.Path] = fp
+			if err := ctx.Err(); err != nil {
+				rows.Close()
+				return nil, err
+			}
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
