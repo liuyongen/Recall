@@ -202,23 +202,47 @@ input {
 }
 
 .indexProgressBar {
+  position: relative;
   justify-self: end;
   width: 220px;
   max-width: 100%;
-  height: 2px;
+  height: 3px;
   overflow: hidden;
   border-radius: 0;
   background: #e6e6e6;
 }
 
-.indexProgressBar div {
+.indexProgressFill {
+  position: relative;
   height: 100%;
   border-radius: 0;
   background: #4f4f4f;
-  transition: width 180ms ease;
+  transition: width 220ms ease;
 }
 
-.indexProgressBar.pending div {
+.indexProgressBar.running::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: var(--progress-width, 0%);
+  max-width: 100%;
+  background-repeat: repeat-x;
+  background-size: 64px 100%;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.55) 40%,
+    rgba(255, 255, 255, 0.9) 50%,
+    rgba(255, 255, 255, 0.55) 60%,
+    transparent 100%
+  );
+  animation: progressSweepBg 0.85s linear infinite;
+  pointer-events: none;
+}
+
+.indexProgressBar.pending .indexProgressFill {
   background: #9a9a9a;
 }
 
@@ -496,6 +520,26 @@ input {
   }
 }
 
+@keyframes progressSweepBg {
+  from {
+    background-position-x: -64px;
+  }
+
+  to {
+    background-position-x: 64px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .indexProgressFill {
+    transition: none;
+  }
+
+  .indexProgressBar.running::after {
+    animation: none;
+  }
+}
+
 @media (max-width: 520px) {
   .searchBand {
     padding: 0 12px 10px;
@@ -591,12 +635,23 @@ input {
     background: #303030;
   }
 
-  .indexProgressBar div {
+  .indexProgressFill {
     background: #b8b8b8;
   }
 
-  .indexProgressBar.pending div {
+  .indexProgressBar.pending .indexProgressFill {
     background: #777;
+  }
+
+  .indexProgressBar.running::after {
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(255, 255, 255, 0.3) 40%,
+      rgba(255, 255, 255, 0.52) 50%,
+      rgba(255, 255, 255, 0.3) 60%,
+      transparent 100%
+    );
   }
 
   .statusCluster .indexProgressTop .indexPhase {

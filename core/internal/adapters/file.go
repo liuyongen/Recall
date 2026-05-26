@@ -124,10 +124,16 @@ func (a *FileAdapter) walkRoot(
 		if err != nil {
 			return nil
 		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
 		if ShouldSkipDir(path, d) {
 			return filepath.SkipDir
 		}
 		if d.IsDir() {
+			return nil
+		}
+		if shouldSkipFileName(d.Name()) {
 			return nil
 		}
 		item, ok := a.extractFile(ctx, path, lastSyncTime)
@@ -150,6 +156,9 @@ func (a *FileAdapter) walkRootCandidates(
 			return ctxErr
 		}
 		if err != nil {
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
 			return nil
 		}
 		if ShouldSkipDir(path, d) {
@@ -182,6 +191,12 @@ func (a *FileAdapter) walkRootCandidates(
 		if shouldSkipFilePath(path) {
 			return nil
 		}
+		if shouldSkipFileName(d.Name()) {
+			return nil
+		}
+		if !extract.SupportsIndexedPath(path) {
+			return nil
+		}
 		info, err := d.Info()
 		if err != nil || info.IsDir() || info.Size() > a.MaxBytes {
 			return nil
@@ -211,11 +226,17 @@ func (a *FileAdapter) extractFile(ctx context.Context, path string, lastSyncTime
 	if shouldSkipFilePath(path) {
 		return model.DataItem{}, false
 	}
+	if shouldSkipFileName(filepath.Base(path)) {
+		return model.DataItem{}, false
+	}
+	if !extract.SupportsIndexedPath(path) {
+		return model.DataItem{}, false
+	}
 	info, err := os.Stat(path)
 	if err != nil || info.IsDir() || info.Size() > a.MaxBytes {
 		return model.DataItem{}, false
 	}
-	if info.ModTime().Unix() <= lastSyncTime || !a.Extractor.Supports(path) {
+	if info.ModTime().Unix() <= lastSyncTime {
 		return model.DataItem{}, false
 	}
 
@@ -243,6 +264,9 @@ func ShouldSkipDir(path string, entry os.DirEntry) bool {
 	if entry == nil || !entry.IsDir() {
 		return false
 	}
+	if entry.Type()&os.ModeSymlink != 0 {
+		return true
+	}
 	name := strings.ToLower(entry.Name())
 	if strings.HasPrefix(name, ".") {
 		return true
@@ -259,6 +283,26 @@ func ShouldSkipDir(path string, entry os.DirEntry) bool {
 // shouldSkipFilePath filters generated files inside known noisy directories.
 func shouldSkipFilePath(path string) bool {
 	return isNoisyFilePath(path)
+}
+
+// shouldSkipFileName filters hidden, temp, and known-noise file names.
+func shouldSkipFileName(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if lower == "" {
+		return true
+	}
+	if strings.HasPrefix(lower, ".") || strings.HasPrefix(lower, "~$") {
+		return true
+	}
+	if _, ok := skippedFileNames[lower]; ok {
+		return true
+	}
+	for _, suffix := range skippedFileSuffixes {
+		if strings.HasSuffix(lower, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // isNoisyFilePath detects app bundles and caches that drown useful documents.
@@ -310,17 +354,47 @@ func (a *FileAdapter) String() string {
 
 var skippedDirNames = map[string]struct{}{
 	"$recycle.bin":              {},
+	".idea":                     {},
+	".vscode":                   {},
+	"__pycache__":               {},
 	"appdata":                   {},
+	"bin":                       {},
+	"build":                     {},
 	"cache":                     {},
 	"dist":                      {},
 	"dist-electron":             {},
 	"logs":                      {},
 	"node_modules":              {},
+	"obj":                       {},
+	"out":                       {},
+	"target":                    {},
 	"temp":                      {},
 	"tmp":                       {},
 	"vendor":                    {},
+	"venv":                      {},
 	"windows.old":               {},
 	"system volume information": {},
+}
+
+var skippedFileNames = map[string]struct{}{
+	".ds_store":  {},
+	"desktop.ini": {},
+	"thumbs.db":  {},
+}
+
+var skippedFileSuffixes = []string{
+	".bak",
+	".cache",
+	".crdownload",
+	".download",
+	".lock",
+	".partial",
+	".part",
+	".swp",
+	".swo",
+	".temp",
+	".tmp",
+	"~",
 }
 
 // ExtractFile extracts a single file into a DataItem; ok=false if skipped.
@@ -335,10 +409,15 @@ func (a *FileAdapter) ExtractChangedFile(ctx context.Context, path string, lastS
 
 var skippedPathFragments = []string{
 	"/appdata/local/google/chrome/user data/",
+	"/appdata/local/microsoft/windows/inetcache/",
 	"/appdata/local/microsoft/edge/user data/",
+	"/appdata/roaming/code/cacheddata/",
+	"/appdata/roaming/code/cache/",
+	"/appdata/roaming/npm-cache/",
 	"/code cache/",
 	"/gpucache/",
 	"/jssdk/",
+	"/pip/cache/",
 	"/software/dingding/",
 	"/software/dingtalk/",
 	"/software/feishu/",

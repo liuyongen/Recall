@@ -11,7 +11,7 @@ import {
   SlidersHorizontal,
   X
 } from 'lucide-react';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 
 type SearchResult = {
   rowid: number;
@@ -644,6 +644,13 @@ function IndexProgressView({ progress }: { progress: IndexProgress }) {
   const percent = ratio === null ? null : Math.round(ratio * 100);
   const phase = progressPhaseLabel(progress.phase);
   const current = progress.current ? basename(progress.current) : '';
+  const animated = progress.active && progress.phase !== 'idle';
+  const fillWidth = ratio === null ? '28%' : `${Math.max(2, ratio * 100)}%`;
+  const barClass = ratio === null
+    ? `indexProgressBar pending${animated ? ' running' : ''}`
+    : `indexProgressBar${animated ? ' running' : ''}`;
+  const fillClass = animated ? 'indexProgressFill animated' : 'indexProgressFill';
+  const barStyle = { '--progress-width': fillWidth } as CSSProperties;
   return (
     <div className="indexProgress" title={formatIndexProgress(progress)}>
       <div className="indexProgressTop">
@@ -653,8 +660,11 @@ function IndexProgressView({ progress }: { progress: IndexProgress }) {
         {progress.files_per_sec > 0 ? <span>{progress.files_per_sec.toFixed(1)} 文件/秒</span> : null}
         {progress.eta_ms > 0 ? <span>ETA {formatDuration(progress.eta_ms)}</span> : null}
       </div>
-      <div className={ratio === null ? 'indexProgressBar pending' : 'indexProgressBar'} aria-hidden="true">
-        <div style={{ width: ratio === null ? '28%' : `${Math.max(2, ratio * 100)}%` }} />
+      <div className={barClass} style={barStyle} aria-hidden="true">
+        <div
+          className={fillClass}
+          style={{ width: fillWidth }}
+        />
       </div>
       {current ? <div className="indexCurrent">{current}</div> : null}
     </div>

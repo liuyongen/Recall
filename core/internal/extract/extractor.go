@@ -38,6 +38,16 @@ var tikaExtensions = map[string]struct{}{
 	".docx": {}, ".pdf": {}, ".pptx": {}, ".rtf": {}, ".xlsx": {},
 }
 
+// SupportsIndexedPath reports whether a file extension is in the indexing whitelist.
+func SupportsIndexedPath(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	if _, ok := textExtensions[ext]; ok {
+		return true
+	}
+	_, ok := tikaExtensions[ext]
+	return ok
+}
+
 // SupportsPlainText reports whether a file can be streamed as text directly.
 func SupportsPlainText(path string) bool {
 	_, ok := textExtensions[strings.ToLower(filepath.Ext(path))]

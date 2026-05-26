@@ -478,6 +478,10 @@ func (e *Engine) prepareFileCandidate(
 		}, item, true
 	}
 
+	if !extract.SupportsIndexedPath(candidate.Path) {
+		return storage.PreparedItem{}, model.DataItem{}, false
+	}
+
 	if extract.SupportsPlainText(candidate.Path) {
 		item := streamingFileItem(candidate, adapter.MaxBytes)
 		entry := storage.PreparedItem{
