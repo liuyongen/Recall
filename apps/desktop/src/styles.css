@@ -167,6 +167,10 @@ input {
   animation: spin 0.9s linear infinite;
 }
 
+.spinIcon {
+  animation: spin 0.9s linear infinite;
+}
+
 .searchIndicator.error {
   color: #c0392b;
 }

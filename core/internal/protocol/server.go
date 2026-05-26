@@ -100,7 +100,15 @@ func (s *Server) handleLine(parent context.Context, line []byte) {
 	}
 
 	timeout := timeoutFor(req.Method)
-	ctx, cancel := context.WithTimeout(parent, timeout)
+	var (
+		ctx    context.Context
+		cancel context.CancelFunc
+	)
+	if timeout <= 0 {
+		ctx, cancel = context.WithCancel(parent)
+	} else {
+		ctx, cancel = context.WithTimeout(parent, timeout)
+	}
 	defer cancel()
 
 	result, err := handler(ctx, req.Params)
@@ -130,7 +138,7 @@ func timeoutFor(method string) time.Duration {
 	case "search":
 		return 120 * time.Second
 	case "index_path":
-		return 30 * time.Minute
+		return 0
 	case "sync_browsers":
 		return 2 * time.Minute
 	default:

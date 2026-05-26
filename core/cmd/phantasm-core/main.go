@@ -60,6 +60,10 @@ func registerHandlers(server *protocol.Server, engine *core.Engine) {
 		return engine.IndexProgress(ctx)
 	})
 
+	server.Handle("cancel_index", func(ctx context.Context, raw json.RawMessage) (any, error) {
+		return engine.CancelIndexPath(ctx)
+	})
+
 	server.Handle("sync_browsers", func(ctx context.Context, raw json.RawMessage) (any, error) {
 		return engine.SyncBrowsers(ctx)
 	})

@@ -34,15 +34,17 @@ type Config struct {
 
 // Engine coordinates adapters, indexing, and search.
 type Engine struct {
-	store      *storage.Store
-	indexer    *indexer.Indexer
-	extractor  extract.Extractor
-	browsers   []model.DataAdapter
-	startedAt  time.Time
-	maxBytes   int64
-	indexMu    sync.Mutex
-	progressMu sync.RWMutex
-	progress   model.IndexProgress
+	store          *storage.Store
+	indexer        *indexer.Indexer
+	extractor      extract.Extractor
+	browsers       []model.DataAdapter
+	startedAt      time.Time
+	maxBytes       int64
+	indexMu        sync.Mutex
+	runMu          sync.Mutex
+	indexRunCancel context.CancelFunc
+	progressMu     sync.RWMutex
+	progress       model.IndexProgress
 	// file watching
 	watcher *fsnotify.Watcher
 	watchMu sync.RWMutex
@@ -185,13 +187,30 @@ func (e *Engine) IndexPath(ctx context.Context, req model.IndexPathRequest) (mod
 
 	pathKey := pathSyncKey(req.Path)
 	lastSync, _ := e.store.GetSyncTime(ctx, pathKey)
+	runCtx, cancel := context.WithCancel(ctx)
+	e.setIndexRunCancel(cancel)
+	defer e.setIndexRunCancel(nil)
+	defer cancel()
 
 	adapter := adapters.NewFileAdapter([]string{req.Path}, e.extractor, maxBytes)
-	summary, err := e.syncFileAdapter(ctx, adapter, lastSync, pathKey)
+	summary, err := e.syncFileAdapter(runCtx, adapter, lastSync, pathKey)
 	if err == nil {
 		e.enableWatch(ctx, req.Path)
 	}
 	return summary, err
+}
+
+// CancelIndexPath cancels the active index_path request if one is running.
+func (e *Engine) CancelIndexPath(ctx context.Context) (map[string]any, error) {
+	_ = ctx
+	e.runMu.Lock()
+	cancel := e.indexRunCancel
+	e.runMu.Unlock()
+	if cancel == nil {
+		return map[string]any{"ok": true, "canceled": false}, nil
+	}
+	cancel()
+	return map[string]any{"ok": true, "canceled": true}, nil
 }
 
 // SyncBrowsers indexes local browser history from supported profiles.
@@ -603,11 +622,11 @@ func pathOnlyItem(candidate adapters.FileCandidate, isDir bool) model.DataItem {
 		title = path
 	}
 	return model.DataItem{
-		ID:       adapters.StableFileID(path),
-		Source:   "file",
-		Title:    title,
-		Preview:  entryType + ": " + path,
-		Metadata: ensureFileMetadata(map[string]any{"entry_type": entryType}, candidate, isDir),
+		ID:        adapters.StableFileID(path),
+		Source:    "file",
+		Title:     title,
+		Preview:   entryType + ": " + path,
+		Metadata:  ensureFileMetadata(map[string]any{"entry_type": entryType}, candidate, isDir),
 		CreatedAt: modified,
 		UpdatedAt: modified,
 	}
@@ -815,6 +834,12 @@ func (e *Engine) refreshProgressLocked(now time.Time) {
 			}
 		}
 	}
+}
+
+func (e *Engine) setIndexRunCancel(cancel context.CancelFunc) {
+	e.runMu.Lock()
+	defer e.runMu.Unlock()
+	e.indexRunCancel = cancel
 }
 
 // enableWatch persists the path and registers it with the fsnotify watcher.

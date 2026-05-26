@@ -6,7 +6,7 @@ import path from 'node:path';
 type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (reason?: unknown) => void;
-  timer: NodeJS.Timeout;
+  timer?: NodeJS.Timeout;
 };
 
 type CoreResponse = {
@@ -18,7 +18,7 @@ type CoreResponse = {
 
 const SEARCH_TIMEOUT_MS = 120_000;
 const DEFAULT_TIMEOUT_MS = 10_000;
-const INDEX_TIMEOUT_MS = 30 * 60 * 1000;
+const INDEX_TIMEOUT_MS = 0;
 const SYNC_TIMEOUT_MS = 2 * 60 * 1000;
 
 let coreProcess: ChildProcessWithoutNullStreams | null = null;
@@ -103,10 +103,12 @@ export function requestCore<T>(
   });
 
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      pending.delete(id);
-      reject(new Error(`Core request timed out: ${method}`));
-    }, timeoutMs);
+    const timer = timeoutMs > 0
+      ? setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(`Core request timed out: ${method}`));
+      }, timeoutMs)
+      : undefined;
 
     pending.set(id, {
       resolve: (value) => resolve(value as T),
@@ -118,7 +120,9 @@ export function requestCore<T>(
       if (!error) {
         return;
       }
-      clearTimeout(timer);
+      if (timer) {
+        clearTimeout(timer);
+      }
       pending.delete(id);
       reject(error);
     });
@@ -156,7 +160,9 @@ function handleCoreLine(line: string): void {
     return;
   }
 
-  clearTimeout(request.timer);
+  if (request.timer) {
+    clearTimeout(request.timer);
+  }
   pending.delete(response.id);
 
   if (response.error) {
@@ -169,7 +175,9 @@ function handleCoreLine(line: string): void {
 
 function rejectPending(reason: Error): void {
   for (const request of pending.values()) {
-    clearTimeout(request.timer);
+    if (request.timer) {
+      clearTimeout(request.timer);
+    }
     request.reject(reason);
   }
   pending.clear();

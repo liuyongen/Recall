@@ -9,6 +9,7 @@ import {
   Loader2,
   Search,
   SlidersHorizontal,
+  Square,
   X
 } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
@@ -81,6 +82,7 @@ export function App() {
   const [status, setStatus] = useState<Status>({ kind: 'idle', text: '' });
   const [indexProgress, setIndexProgress] = useState<IndexProgress | null>(null);
   const [indexing, setIndexing] = useState(false);
+  const [cancellingIndex, setCancellingIndex] = useState(false);
   const [searching, setSearching] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const searchBandRef = useRef<HTMLElement>(null);
@@ -340,9 +342,29 @@ export function App() {
       }
       setStatusAuto({ kind: 'idle', text: `索引完成，共 ${count} 个文件` });
     } catch (error) {
-      setStatusAuto({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+      const message = error instanceof Error ? error.message : String(error);
+      if (isIndexCanceledError(message)) {
+        setStatusAuto({ kind: 'idle', text: '索引已取消' });
+      } else {
+        setStatusAuto({ kind: 'error', text: message });
+      }
     } finally {
       setIndexing(false);
+      setCancellingIndex(false);
+    }
+  }
+
+  async function cancelIndexing() {
+    if (!api || !indexing || cancellingIndex) {
+      return;
+    }
+    setCancellingIndex(true);
+    setStatus({ kind: 'working', text: '正在取消索引...' });
+    try {
+      await api.cancelIndex();
+    } catch (error) {
+      setStatusAuto({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+      setCancellingIndex(false);
     }
   }
 
@@ -428,8 +450,20 @@ export function App() {
           >
             <SlidersHorizontal size={18} />
           </button>
-          <button className="iconButton" title="索引文件夹" onClick={indexFolder}>
-            <FolderOpen size={18} />
+          <button
+            className={indexing ? 'iconButton active' : 'iconButton'}
+            title={indexing ? (cancellingIndex ? '正在取消索引' : '取消索引') : '索引文件夹'}
+            onClick={() => {
+              if (indexing) {
+                void cancelIndexing();
+                return;
+              }
+              void indexFolder();
+            }}
+          >
+            {indexing
+              ? (cancellingIndex ? <Loader2 size={18} className="spinIcon" /> : <Square size={16} />)
+              : <FolderOpen size={18} />}
           </button>
           <button className="iconButton" title="同步浏览器" onClick={syncBrowsers}>
             <Globe size={18} />
@@ -695,4 +729,9 @@ function formatDuration(ms: number) {
   const minutes = Math.floor(seconds / 60);
   const rest = seconds % 60;
   return rest ? `${minutes}m${rest}s` : `${minutes}m`;
+}
+
+function isIndexCanceledError(message: string) {
+  const lower = message.toLowerCase();
+  return lower.includes('context canceled') || lower.includes('context cancelled');
 }
