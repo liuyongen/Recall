@@ -156,6 +156,7 @@ async function registerShellControls(): Promise<void> {
 function registerIpc(): void {
   ipcMain.handle('core:health', () => requestCore('health'));
   ipcMain.handle('core:search', (_event, params) => requestCore('search', params));
+  ipcMain.handle('core:cancelSearch', () => requestCore('cancel_search'));
   ipcMain.handle('core:syncBrowsers', () => requestCore('sync_browsers'));
   ipcMain.handle('core:cancelSyncBrowsers', () => requestCore('cancel_sync_browsers'));
   ipcMain.handle('core:indexPath', (_event, params) => requestCore('index_path', params));

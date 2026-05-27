@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 const api = {
   health: () => ipcRenderer.invoke('core:health'),
   search: (params: SearchParams) => ipcRenderer.invoke('core:search', params),
+  cancelSearch: () => ipcRenderer.invoke('core:cancelSearch'),
   indexPath: (params: IndexPathParams) => ipcRenderer.invoke('core:indexPath', params),
   cancelIndex: () => ipcRenderer.invoke('core:cancelIndex'),
   cancelSyncBrowsers: () => ipcRenderer.invoke('core:cancelSyncBrowsers'),

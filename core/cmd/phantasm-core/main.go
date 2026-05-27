@@ -47,6 +47,9 @@ func registerHandlers(server *protocol.Server, engine *core.Engine) {
 		}
 		return engine.Search(ctx, request)
 	})
+	server.Handle("cancel_search", func(ctx context.Context, raw json.RawMessage) (any, error) {
+		return engine.CancelSearch(ctx)
+	})
 
 	server.Handle("index_path", func(ctx context.Context, raw json.RawMessage) (any, error) {
 		var request model.IndexPathRequest

@@ -34,18 +34,19 @@ type Config struct {
 
 // Engine coordinates adapters, indexing, and search.
 type Engine struct {
-	store          *storage.Store
-	indexer        *indexer.Indexer
-	extractor      extract.Extractor
-	browsers       []model.DataAdapter
-	startedAt      time.Time
-	maxBytes       int64
-	indexMu        sync.Mutex
-	runMu          sync.Mutex
-	indexRunCancel context.CancelFunc
-	syncRunCancel  context.CancelFunc
-	progressMu     sync.RWMutex
-	progress       model.IndexProgress
+	store           *storage.Store
+	indexer         *indexer.Indexer
+	extractor       extract.Extractor
+	browsers        []model.DataAdapter
+	startedAt       time.Time
+	maxBytes        int64
+	indexMu         sync.Mutex
+	runMu           sync.Mutex
+	indexRunCancel  context.CancelFunc
+	syncRunCancel   context.CancelFunc
+	searchRunCancel context.CancelFunc
+	progressMu      sync.RWMutex
+	progress        model.IndexProgress
 	// file watching
 	watcher *fsnotify.Watcher
 	watchMu sync.RWMutex
@@ -155,8 +156,13 @@ func (e *Engine) Search(ctx context.Context, req model.SearchRequest) (model.Sea
 		return model.SearchResponse{Query: req.Query, Results: []model.SearchResult{}}, nil
 	}
 
+	runCtx, cancel := context.WithCancel(ctx)
+	e.setSearchRunCancel(cancel)
+	defer e.setSearchRunCancel(nil)
+	defer cancel()
+
 	ftsQuery := indexer.BuildFTSQuery(req.Query)
-	results, hasMore, err := e.store.Search(ctx, req, ftsQuery)
+	results, hasMore, err := e.store.Search(runCtx, req, ftsQuery)
 	if err != nil {
 		return model.SearchResponse{}, err
 	}
@@ -171,6 +177,19 @@ func (e *Engine) Search(ctx context.Context, req model.SearchRequest) (model.Sea
 		Results:   results,
 		HasMore:   hasMore,
 	}, nil
+}
+
+// CancelSearch cancels the active search request if one is running.
+func (e *Engine) CancelSearch(ctx context.Context) (map[string]any, error) {
+	_ = ctx
+	e.runMu.Lock()
+	cancel := e.searchRunCancel
+	e.runMu.Unlock()
+	if cancel == nil {
+		return map[string]any{"ok": true, "canceled": false}, nil
+	}
+	cancel()
+	return map[string]any{"ok": true, "canceled": true}, nil
 }
 
 // IndexPath indexes a user-selected file or directory (incremental on repeat calls).
@@ -886,6 +905,12 @@ func (e *Engine) setSyncRunCancel(cancel context.CancelFunc) {
 	e.runMu.Lock()
 	defer e.runMu.Unlock()
 	e.syncRunCancel = cancel
+}
+
+func (e *Engine) setSearchRunCancel(cancel context.CancelFunc) {
+	e.runMu.Lock()
+	defer e.runMu.Unlock()
+	e.searchRunCancel = cancel
 }
 
 // enableWatch persists the path and registers it with the fsnotify watcher.

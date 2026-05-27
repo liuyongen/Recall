@@ -167,12 +167,18 @@ func upsertPreparedItem(ctx context.Context, tx *sql.Tx, entry PreparedItem) err
 
 // Search executes an FTS5 query and returns ranked chunk results.
 func (s *Store) Search(ctx context.Context, req model.SearchRequest, ftsQuery string) ([]model.SearchResult, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	limit := normalizeSearchLimit(req.Limit)
 	offset := normalizeSearchOffset(req.Offset)
 	window := offset + limit
 	if cjkQuery := buildCJKQuery(req.Query); cjkQuery != "" {
 		results, err := s.searchTable(ctx, req, cjkQuery, cjkLayeredFTSTable, "bm25("+cjkLayeredFTSTable+")", window)
 		if err == nil && len(results) > 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, false, err
+			}
 			ranked := rerankSearchResults(results, req.Query, 0)
 			page, hasMore := paginateResults(ranked, offset, limit)
 			return page, hasMore, nil
@@ -181,6 +187,9 @@ func (s *Store) Search(ctx context.Context, req model.SearchRequest, ftsQuery st
 
 	results, err := s.searchTable(ctx, req, ftsQuery, "chunk_fts", "bm25(chunk_fts, 8.0, 1.0)", window)
 	if err != nil {
+		return nil, false, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
 	ranked := rerankSearchResults(results, req.Query, 0)
@@ -217,6 +226,9 @@ ORDER BY score ASC, c.updated_at DESC`, scoreExpr, table, table, strings.Join(wh
 
 	results := make([]model.SearchResult, 0, candidateCap)
 	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		result, err := scanSearchResult(rows)
 		if err != nil {
 			return nil, err

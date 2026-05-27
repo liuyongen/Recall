@@ -92,6 +92,7 @@ export function App() {
   const resultItemRefs = useRef<Array<HTMLElement | null>>([]);
   const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const shouldResetResultsScrollRef = useRef(false);
+  const searchSequenceRef = useRef(0);
 
   function setStatusAuto(s: Status) {
     setStatus(s);
@@ -138,6 +139,8 @@ export function App() {
 
     const trimmed = query.trim();
     if (!trimmed) {
+      searchSequenceRef.current += 1;
+      void api.cancelSearch().catch(() => undefined);
       setResults([]);
       setHasMore(false);
       setElapsed(null);
@@ -150,8 +153,19 @@ export function App() {
     }
 
     const controller = new AbortController();
+    const searchSequence = ++searchSequenceRef.current;
+    let started = false;
     const timer = window.setTimeout(async () => {
+      started = true;
       setSearching(true);
+      try {
+        await api.cancelSearch();
+      } catch {
+        // Best-effort cancel to avoid piling up stale requests.
+      }
+      if (controller.signal.aborted || searchSequence !== searchSequenceRef.current) {
+        return;
+      }
       try {
         const response = (await api.search({
           query: trimmed,
@@ -159,7 +173,7 @@ export function App() {
           limit: PAGE_SIZE,
           offset: 0
         })) as SearchResponse;
-        if (controller.signal.aborted) {
+        if (controller.signal.aborted || searchSequence !== searchSequenceRef.current) {
           return;
         }
         shouldResetResultsScrollRef.current = true;
@@ -172,11 +186,15 @@ export function App() {
         }
         setStatus({ kind: 'idle', text: '' });
       } catch (error) {
-        if (!controller.signal.aborted) {
-          setStatus({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+        if (!controller.signal.aborted && searchSequence === searchSequenceRef.current) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (isSearchTimeoutError(message)) {
+            void api.cancelSearch().catch(() => undefined);
+          }
+          setStatus({ kind: 'error', text: formatSearchError(message) });
         }
       } finally {
-        if (!controller.signal.aborted) {
+        if (!controller.signal.aborted && searchSequence === searchSequenceRef.current) {
           setSearching(false);
         }
       }
@@ -185,7 +203,9 @@ export function App() {
     return () => {
       controller.abort();
       window.clearTimeout(timer);
-      setSearching(false);
+      if (started) {
+        void api.cancelSearch().catch(() => undefined);
+      }
     };
   }, [api, query, source]);
 
@@ -294,7 +314,11 @@ export function App() {
       setElapsed(response.elapsed_ms);
       setStatus({ kind: 'idle', text: '' });
     } catch (error) {
-      setStatus({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+      const message = error instanceof Error ? error.message : String(error);
+      if (isSearchTimeoutError(message)) {
+        void api.cancelSearch().catch(() => undefined);
+      }
+      setStatus({ kind: 'error', text: formatSearchError(message) });
     } finally {
       setSearching(false);
       inputRef.current?.focus();
@@ -772,4 +796,15 @@ function formatDuration(ms: number) {
 function isIndexCanceledError(message: string) {
   const lower = message.toLowerCase();
   return lower.includes('context canceled') || lower.includes('context cancelled');
+}
+
+function isSearchTimeoutError(message: string) {
+  return message.toLowerCase().includes('core request timed out: search');
+}
+
+function formatSearchError(message: string) {
+  if (isSearchTimeoutError(message)) {
+    return '搜索超时，已自动取消本次请求，请重试或缩小范围';
+  }
+  return message;
 }
