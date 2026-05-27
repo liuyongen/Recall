@@ -18,6 +18,11 @@ import { ensureCore, requestCore, stopCore } from './core-client';
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
+type CancelResponse = {
+  ok: boolean;
+  canceled: boolean;
+  timed_out?: boolean;
+};
 
 function placeWindowLikeLauncher(win: BrowserWindow): void {
   const cursorPoint = screen.getCursorScreenPoint();
@@ -123,6 +128,23 @@ function hideWindow(): void {
   }
 }
 
+async function requestCoreCancel(method: 'cancel_search' | 'cancel_index' | 'cancel_sync_browsers'): Promise<CancelResponse> {
+  try {
+    return await requestCore<CancelResponse>(method);
+  } catch (error) {
+    if (isCoreTimeoutError(error, method)) {
+      console.warn(`[core] ${method} timed out; treating as best-effort cancel`);
+      return { ok: false, canceled: false, timed_out: true };
+    }
+    throw error;
+  }
+}
+
+function isCoreTimeoutError(error: unknown, method: string): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes(`Core request timed out: ${method}`);
+}
+
 /** Registers app-level shortcuts and tray controls. */
 async function registerShellControls(): Promise<void> {
   // Ctrl+Space — wake up / show
@@ -156,11 +178,11 @@ async function registerShellControls(): Promise<void> {
 function registerIpc(): void {
   ipcMain.handle('core:health', () => requestCore('health'));
   ipcMain.handle('core:search', (_event, params) => requestCore('search', params));
-  ipcMain.handle('core:cancelSearch', () => requestCore('cancel_search'));
+  ipcMain.handle('core:cancelSearch', () => requestCoreCancel('cancel_search'));
   ipcMain.handle('core:syncBrowsers', () => requestCore('sync_browsers'));
-  ipcMain.handle('core:cancelSyncBrowsers', () => requestCore('cancel_sync_browsers'));
+  ipcMain.handle('core:cancelSyncBrowsers', () => requestCoreCancel('cancel_sync_browsers'));
   ipcMain.handle('core:indexPath', (_event, params) => requestCore('index_path', params));
-  ipcMain.handle('core:cancelIndex', () => requestCore('cancel_index'));
+  ipcMain.handle('core:cancelIndex', () => requestCoreCancel('cancel_index'));
   ipcMain.handle('core:indexProgress', () => requestCore('index_progress'));
   ipcMain.handle('app:openPath', (_event, targetPath: string) => shell.openPath(targetPath));
   ipcMain.handle('app:openUrl', (_event, url: string) => shell.openExternal(url));

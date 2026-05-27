@@ -21,6 +21,7 @@ const SEARCH_TIMEOUT_MS = 120_000;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const INDEX_TIMEOUT_MS = 0;
 const SYNC_TIMEOUT_MS = 0;
+const CANCEL_TIMEOUT_MS = 1_500;
 
 let coreProcess: ChildProcessWithoutNullStreams | null = null;
 let nextID = 1;
@@ -134,6 +135,9 @@ export function requestCore<T>(
 function timeoutFor(method: string): number {
   if (method === 'search') {
     return SEARCH_TIMEOUT_MS;
+  }
+  if (method === 'cancel_search' || method === 'cancel_index' || method === 'cancel_sync_browsers') {
+    return CANCEL_TIMEOUT_MS;
   }
   if (method === 'index_path') {
     return INDEX_TIMEOUT_MS;
