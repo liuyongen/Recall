@@ -21,10 +21,11 @@ if (-not (Test-Path (Join-Path $root "node_modules"))) {
 }
 
 # ── Step 4: Launch dev mode (Vite + Electron) ────────────────────────────────
-Write-Host "▶ Starting Phantasm (dev mode)..." -ForegroundColor Cyan
+Write-Host "▶ Starting Recall (dev mode)..." -ForegroundColor Cyan
 Push-Location $root
 try {
   & npm run dev
 } finally {
   Pop-Location
 }
+

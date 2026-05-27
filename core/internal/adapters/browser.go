@@ -14,7 +14,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"phantasm/core/internal/model"
+	"recall/core/internal/model"
 )
 
 // BrowserKind identifies a supported local browser profile.
@@ -403,7 +403,7 @@ func copyLockedDB(path string) (string, func(), error) {
 	}
 	defer source.Close()
 
-	target, err := os.CreateTemp("", "phantasm-browser-*.sqlite")
+	target, err := os.CreateTemp("", "recall-browser-*.sqlite")
 	if err != nil {
 		return "", func() {}, err
 	}

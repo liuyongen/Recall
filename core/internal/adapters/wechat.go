@@ -3,7 +3,7 @@ package adapters
 import (
 	"fmt"
 
-	"phantasm/core/internal/model"
+	"recall/core/internal/model"
 )
 
 // WeChatAdapter is a compliance-safe placeholder for user-provided exports.

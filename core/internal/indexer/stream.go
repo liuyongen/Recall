@@ -8,7 +8,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"phantasm/core/internal/model"
+	"recall/core/internal/model"
 )
 
 // StreamItemChunks cleans and chunks text from reader without materializing the

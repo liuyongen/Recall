@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"phantasm/core/internal/model"
+	"recall/core/internal/model"
 )
 
 const (

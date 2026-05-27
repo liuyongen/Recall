@@ -28,11 +28,11 @@ const pending = new Map<string, PendingRequest>();
 
 /** Returns the platform-specific core executable path. */
 export function getCorePath(): string {
-  if (process.env.PHANTASM_CORE_PATH) {
-    return process.env.PHANTASM_CORE_PATH;
+  if (process.env.RECALL_CORE_PATH) {
+    return process.env.RECALL_CORE_PATH;
   }
 
-  const exeName = process.platform === 'win32' ? 'phantasm-core.exe' : 'phantasm-core';
+  const exeName = process.platform === 'win32' ? 'recall-core.exe' : 'recall-core';
   if (app.isPackaged) {
     return path.join(process.resourcesPath, 'core', exeName);
   }
@@ -51,7 +51,7 @@ export function ensureCore(): ChildProcessWithoutNullStreams {
     cwd: app.getPath('userData'),
     env: {
       ...process.env,
-      PHANTASM_DB_PATH: path.join(app.getPath('userData'), 'recall.db')
+      RECALL_DB_PATH: path.join(app.getPath('userData'), 'recall.db')
     },
     stdio: ['pipe', 'pipe', 'pipe']
   });
@@ -60,12 +60,12 @@ export function ensureCore(): ChildProcessWithoutNullStreams {
   lines.on('line', handleCoreLine);
 
   coreProcess.stderr.on('data', (chunk) => {
-    console.error(`[phantasm-core] ${chunk.toString().trim()}`);
+    console.error(`[recall-core] ${chunk.toString().trim()}`);
   });
 
   coreProcess.on('error', (error) => {
     rejectPending(error);
-    console.error('[phantasm-core] failed to start:', error);
+    console.error('[recall-core] failed to start:', error);
     coreProcess = null;
   });
 
@@ -149,7 +149,7 @@ function handleCoreLine(line: string): void {
   try {
     response = JSON.parse(line) as CoreResponse;
   } catch (error) {
-    console.error('[phantasm-core] invalid json:', line, error);
+    console.error('[recall-core] invalid json:', line, error);
     return;
   }
 
@@ -193,3 +193,4 @@ function rejectPending(reason: Error): void {
   }
   pending.clear();
 }
+

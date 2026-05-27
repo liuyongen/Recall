@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 
-	"phantasm/core/internal/model"
-	"phantasm/core/internal/storage"
+	"recall/core/internal/model"
+	"recall/core/internal/storage"
 )
 
 // Indexer owns the text cleanup and chunking pipeline.

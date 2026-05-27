@@ -19,7 +19,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"phantasm/core/internal/model"
+	"recall/core/internal/model"
 )
 
 const cjkLayeredFTSTable = "chunk_cjk_layered_fts"

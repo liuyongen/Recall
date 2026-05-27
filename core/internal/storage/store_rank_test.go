@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"phantasm/core/internal/model"
+	"recall/core/internal/model"
 )
 
 func TestRerankPrefersExactFilename(t *testing.T) {

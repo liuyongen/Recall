@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"phantasm/core/internal/core"
-	"phantasm/core/internal/model"
+	"recall/core/internal/core"
+	"recall/core/internal/model"
 )
 
 // TestIncrementalIndex verifies that a second IndexPath call only processes

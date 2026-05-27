@@ -126,7 +126,7 @@ try {
           metadata: {}
         };
         window.__heightCalls = heightCalls;
-        Object.defineProperty(window, 'phantasm', {
+        Object.defineProperty(window, 'recall', {
           configurable: true,
           value: {
             search: async ({ query }) => {
@@ -142,6 +142,7 @@ try {
             },
             chooseFolder: async () => null,
             indexPath: async () => ({ indexed: 0 }),
+            cancelSearch: async () => ({ ok: true, canceled: false }),
             syncBrowsers: async () => true,
             openPath: async () => true,
             openUrl: async () => true,
@@ -219,3 +220,4 @@ try {
   await delay(300);
   await rm(profileDir, { recursive: true, force: true }).catch(() => {});
 }
+

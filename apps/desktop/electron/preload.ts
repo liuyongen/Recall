@@ -18,7 +18,7 @@ const api = {
   theme: () => ipcRenderer.invoke('app:theme')
 };
 
-contextBridge.exposeInMainWorld('phantasm', api);
+contextBridge.exposeInMainWorld('recall', api);
 
 export type SearchParams = {
   query: string;
@@ -55,4 +55,5 @@ export type IndexProgress = {
   last_completed?: number;
 };
 
-export type PhantasmAPI = typeof api;
+export type RecallAPI = typeof api;
+

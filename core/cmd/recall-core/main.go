@@ -9,9 +9,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"phantasm/core/internal/core"
-	"phantasm/core/internal/model"
-	"phantasm/core/internal/protocol"
+	"recall/core/internal/core"
+	"recall/core/internal/model"
+	"recall/core/internal/protocol"
 )
 
 // main starts the stdin/stdout JSON-line core server.

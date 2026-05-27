@@ -5,7 +5,7 @@ $outDir = Join-Path $root "core\bin"
 $isWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
   [System.Runtime.InteropServices.OSPlatform]::Windows
 )
-$exe = if ($isWindows) { "phantasm-core.exe" } else { "phantasm-core" }
+$exe = if ($isWindows) { "recall-core.exe" } else { "recall-core" }
 $goCommand = Get-Command go -ErrorAction SilentlyContinue
 $goPath = if ($goCommand) { $goCommand.Source } else { $null }
 if (-not $goPath) {
@@ -28,8 +28,9 @@ try {
   if (Test-Path $target) {
     Remove-Item -LiteralPath $target -Force
   }
-  & $goPath build -trimpath -ldflags "-s -w" -o $target ./core/cmd/phantasm-core
+  & $goPath build -trimpath -ldflags "-s -w" -o $target ./core/cmd/recall-core
 }
 finally {
   Pop-Location
 }
+

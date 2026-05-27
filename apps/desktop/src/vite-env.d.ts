@@ -1,9 +1,10 @@
 /// <reference types="vite/client" />
 
-import type { PhantasmAPI } from '../electron/preload';
+import type { RecallAPI } from '../electron/preload';
 
 declare global {
   interface Window {
-    phantasm?: PhantasmAPI;
+    recall?: RecallAPI;
   }
 }
+

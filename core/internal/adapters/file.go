@@ -10,8 +10,8 @@ import (
 	"runtime"
 	"strings"
 
-	"phantasm/core/internal/extract"
-	"phantasm/core/internal/model"
+	"recall/core/internal/extract"
+	"recall/core/internal/model"
 )
 
 // FileAdapter indexes user-selected local files and directories.
@@ -377,9 +377,9 @@ var skippedDirNames = map[string]struct{}{
 }
 
 var skippedFileNames = map[string]struct{}{
-	".ds_store":  {},
+	".ds_store":   {},
 	"desktop.ini": {},
-	"thumbs.db":  {},
+	"thumbs.db":   {},
 }
 
 var skippedFileSuffixes = []string{

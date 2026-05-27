@@ -71,7 +71,7 @@ const sourceLabels: Record<string, string> = {
 export function App() {
   const PAGE_SIZE = 50;
 
-  const api = window.phantasm;
+  const api = window.recall;
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
   const [hasMore, setHasMore] = useState(false);
@@ -605,7 +605,7 @@ export function App() {
                       <button
                         className="miniIconButton"
                         title="在浏览器中打开"
-                        onClick={() => { const u = getUrl(result); if (u) void window.phantasm?.openUrl(u); }}
+                        onClick={() => { const u = getUrl(result); if (u) void window.recall?.openUrl(u); }}
                       >
                         <ExternalLink size={14} />
                       </button>
@@ -625,7 +625,7 @@ export function App() {
                       {result.path}
                     </button>
                   ) : getUrl(result) ? (
-                    <button className="path pathButton" title="在浏览器中打开" onClick={() => { const u = getUrl(result); if (u) void window.phantasm?.openUrl(u); }}>
+                    <button className="path pathButton" title="在浏览器中打开" onClick={() => { const u = getUrl(result); if (u) void window.recall?.openUrl(u); }}>
                       <ExternalLink size={13} />
                       {getUrl(result)}
                     </button>
@@ -659,16 +659,16 @@ export function App() {
 
 function openResult(result: SearchResult) {
   if (result.path) {
-    void window.phantasm?.openPath(result.path);
+    void window.recall?.openPath(result.path);
   } else {
     const url = getUrl(result);
-    if (url) void window.phantasm?.openUrl(url);
+    if (url) void window.recall?.openUrl(url);
   }
 }
 
 function showResultInFolder(result: SearchResult) {
   if (result.path) {
-    void window.phantasm?.showItemInFolder(result.path);
+    void window.recall?.showItemInFolder(result.path);
   }
 }
 
@@ -808,3 +808,4 @@ function formatSearchError(message: string) {
   }
   return message;
 }
+

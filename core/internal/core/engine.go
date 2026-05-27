@@ -18,11 +18,11 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
-	"phantasm/core/internal/adapters"
-	"phantasm/core/internal/extract"
-	"phantasm/core/internal/indexer"
-	"phantasm/core/internal/model"
-	"phantasm/core/internal/storage"
+	"recall/core/internal/adapters"
+	"recall/core/internal/extract"
+	"recall/core/internal/indexer"
+	"recall/core/internal/model"
+	"recall/core/internal/storage"
 )
 
 // Config contains runtime paths and extraction settings.
@@ -58,7 +58,7 @@ type Engine struct {
 func DefaultConfig() Config {
 	return Config{
 		DBPath:   defaultDBPath(),
-		TikaURL:  os.Getenv("PHANTASM_TIKA_URL"),
+		TikaURL:  os.Getenv("RECALL_TIKA_URL"),
 		MaxBytes: extract.DefaultMaxBytes,
 	}
 }
@@ -1042,7 +1042,7 @@ func pathSyncKey(path string) string {
 	return "file:" + hex.EncodeToString(sum[:8])
 }
 func defaultDBPath() string {
-	if path := os.Getenv("PHANTASM_DB_PATH"); path != "" {
+	if path := os.Getenv("RECALL_DB_PATH"); path != "" {
 		return path
 	}
 	if local := os.Getenv("LOCALAPPDATA"); local != "" {

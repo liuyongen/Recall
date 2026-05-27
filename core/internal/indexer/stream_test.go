@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"phantasm/core/internal/model"
+	"recall/core/internal/model"
 )
 
 func TestStreamItemChunksMatchesPreparedChunks(t *testing.T) {
