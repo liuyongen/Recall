@@ -1,4 +1,4 @@
-import { ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
+import { ChildProcessWithoutNullStreams, execFile, spawn } from 'node:child_process';
 import { app } from 'electron';
 import { createInterface } from 'node:readline';
 import path from 'node:path';
@@ -79,13 +79,29 @@ export function ensureCore(): ChildProcessWithoutNullStreams {
 }
 
 /** Stops the Go core process and clears pending requests. */
-export function stopCore(): void {
+export async function stopCore(timeoutMs = 2500): Promise<void> {
   if (!coreProcess) {
     return;
   }
 
-  coreProcess.kill();
+  const child = coreProcess;
   coreProcess = null;
+  rejectPending(new Error('Go core stopped'));
+
+  try {
+    child.stdin.end();
+  } catch {
+    // The process may already be gone.
+  }
+
+  if (!child.killed) {
+    child.kill();
+  }
+
+  const exited = await waitForExit(child, timeoutMs);
+  if (!exited && child.pid && process.platform === 'win32') {
+    await killProcessTree(child.pid);
+  }
 }
 
 /** Sends a JSON-line request to the Go core and resolves with its result. */
@@ -196,5 +212,33 @@ function rejectPending(reason: Error): void {
     request.reject(reason);
   }
   pending.clear();
+}
+
+function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve(true);
+  }
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.off('exit', onExit);
+      resolve(false);
+    }, timeoutMs);
+
+    const onExit = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+
+    child.once('exit', onExit);
+  });
+}
+
+function killProcessTree(pid: number): Promise<void> {
+  return new Promise((resolve) => {
+    execFile('taskkill', ['/PID', String(pid), '/T', '/F'], () => {
+      resolve();
+    });
+  });
 }
 

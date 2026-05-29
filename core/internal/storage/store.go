@@ -181,6 +181,9 @@ func (s *Store) Search(ctx context.Context, req model.SearchRequest, ftsQuery st
 			}
 			ranked := rerankSearchResults(results, req.Query, 0)
 			page, hasMore := paginateResults(ranked, offset, limit)
+			if err := s.loadSearchMetadata(ctx, page); err != nil {
+				return nil, false, err
+			}
 			return page, hasMore, nil
 		}
 	}
@@ -194,6 +197,9 @@ func (s *Store) Search(ctx context.Context, req model.SearchRequest, ftsQuery st
 	}
 	ranked := rerankSearchResults(results, req.Query, 0)
 	page, hasMore := paginateResults(ranked, offset, limit)
+	if err := s.loadSearchMetadata(ctx, page); err != nil {
+		return nil, false, err
+	}
 	return page, hasMore, nil
 }
 
@@ -208,8 +214,8 @@ func (s *Store) searchTable(
 ) ([]model.SearchResult, error) {
 	where, args := buildSearchWhere(req, matchQuery, table)
 	sqlText := fmt.Sprintf(`
-SELECT c.rowid, c.item_id, c.source, c.title, c.content, c.preview, c.path,
-       c.file_type, c.updated_at, %s AS score, c.metadata_json
+SELECT c.rowid, c.item_id, c.source, c.title, c.preview, c.path,
+       c.file_type, c.updated_at, %s AS score
 FROM %s
 JOIN chunks c ON c.rowid = %s.rowid
 WHERE %s
@@ -229,13 +235,51 @@ ORDER BY score ASC, c.updated_at DESC`, scoreExpr, table, table, strings.Join(wh
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		result, err := scanSearchResult(rows)
+		result, err := scanSearchCandidate(rows)
 		if err != nil {
 			return nil, err
 		}
 		results = append(results, result)
 	}
 	return results, rows.Err()
+}
+
+func (s *Store) loadSearchMetadata(ctx context.Context, results []model.SearchResult) error {
+	if len(results) == 0 {
+		return nil
+	}
+	placeholders := make([]string, len(results))
+	args := make([]any, len(results))
+	for i, result := range results {
+		placeholders[i] = "?"
+		args[i] = result.RowID
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT rowid, metadata_json FROM chunks WHERE rowid IN ("+strings.Join(placeholders, ",")+")",
+		args...,
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	metadataByRowID := make(map[int64]map[string]any, len(results))
+	for rows.Next() {
+		var rowID int64
+		var metadataJSON string
+		if err := rows.Scan(&rowID, &metadataJSON); err != nil {
+			return err
+		}
+		metadataByRowID[rowID] = decodeMetadata(metadataJSON)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for i := range results {
+		results[i].Metadata = metadataByRowID[results[i].RowID]
+	}
+	return nil
 }
 
 // GetWatchedPaths returns all paths that should be actively watched.
@@ -1368,23 +1412,17 @@ func scanChunk(rows interface {
 	return chunk, nil
 }
 
-// scanSearchResult converts one SQL row into a SearchResult.
-func scanSearchResult(rows *sql.Rows) (model.SearchResult, error) {
+// scanSearchCandidate converts a lightweight candidate row into a SearchResult.
+func scanSearchCandidate(rows *sql.Rows) (model.SearchResult, error) {
 	var result model.SearchResult
-	var content string
-	var metadataJSON string
 	err := rows.Scan(
-		&result.RowID, &result.ItemID, &result.Source, &result.Title, &content,
+		&result.RowID, &result.ItemID, &result.Source, &result.Title,
 		&result.Preview, &result.Path, &result.FileType, &result.UpdatedAt,
-		&result.Score, &metadataJSON,
+		&result.Score,
 	)
 	if err != nil {
 		return result, err
 	}
-	if result.Preview == "" {
-		result.Preview = content
-	}
-	result.Metadata = decodeMetadata(metadataJSON)
 	return result, nil
 }
 

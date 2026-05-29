@@ -45,6 +45,7 @@ type Engine struct {
 	indexRunCancel  context.CancelFunc
 	syncRunCancel   context.CancelFunc
 	searchRunCancel context.CancelFunc
+	searchRunID     uint64
 	progressMu      sync.RWMutex
 	progress        model.IndexProgress
 	// file watching
@@ -157,9 +158,8 @@ func (e *Engine) Search(ctx context.Context, req model.SearchRequest) (model.Sea
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
-	e.setSearchRunCancel(cancel)
-	defer e.setSearchRunCancel(nil)
-	defer cancel()
+	runID := e.startSearchRun(cancel)
+	defer e.finishSearchRun(runID, cancel)
 
 	ftsQuery := indexer.BuildFTSQuery(req.Query)
 	results, hasMore, err := e.store.Search(runCtx, req, ftsQuery)
@@ -190,6 +190,26 @@ func (e *Engine) CancelSearch(ctx context.Context) (map[string]any, error) {
 	}
 	cancel()
 	return map[string]any{"ok": true, "canceled": true}, nil
+}
+
+func (e *Engine) startSearchRun(cancel context.CancelFunc) uint64 {
+	e.runMu.Lock()
+	defer e.runMu.Unlock()
+	if e.searchRunCancel != nil {
+		e.searchRunCancel()
+	}
+	e.searchRunID++
+	e.searchRunCancel = cancel
+	return e.searchRunID
+}
+
+func (e *Engine) finishSearchRun(runID uint64, cancel context.CancelFunc) {
+	cancel()
+	e.runMu.Lock()
+	defer e.runMu.Unlock()
+	if e.searchRunID == runID {
+		e.searchRunCancel = nil
+	}
 }
 
 // IndexPath indexes a user-selected file or directory (incremental on repeat calls).
@@ -905,12 +925,6 @@ func (e *Engine) setSyncRunCancel(cancel context.CancelFunc) {
 	e.runMu.Lock()
 	defer e.runMu.Unlock()
 	e.syncRunCancel = cancel
-}
-
-func (e *Engine) setSearchRunCancel(cancel context.CancelFunc) {
-	e.runMu.Lock()
-	defer e.runMu.Unlock()
-	e.searchRunCancel = cancel
 }
 
 // enableWatch persists the path and registers it with the fsnotify watcher.

@@ -18,6 +18,7 @@ import { ensureCore, requestCore, stopCore } from './core-client';
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
+let coreStoppedForQuit = false;
 type CancelResponse = {
   ok: boolean;
   canceled: boolean;
@@ -218,8 +219,15 @@ app.on('window-all-closed', () => {
   hideWindow();
 });
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (coreStoppedForQuit) {
+    return;
+  }
+  event.preventDefault();
   globalShortcut.unregisterAll();
-  stopCore();
   tray = null;
+  void stopCore().finally(() => {
+    coreStoppedForQuit = true;
+    app.quit();
+  });
 });
