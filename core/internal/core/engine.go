@@ -32,22 +32,33 @@ type Config struct {
 	MaxBytes int64
 }
 
+const (
+	fingerprintKindPath    = "path:"
+	fingerprintKindContent = "content:"
+)
+
 // Engine coordinates adapters, indexing, and search.
 type Engine struct {
-	store           *storage.Store
-	indexer         *indexer.Indexer
-	extractor       extract.Extractor
-	browsers        []model.DataAdapter
-	startedAt       time.Time
-	maxBytes        int64
-	indexMu         sync.Mutex
-	runMu           sync.Mutex
-	indexRunCancel  context.CancelFunc
-	syncRunCancel   context.CancelFunc
-	searchRunCancel context.CancelFunc
-	searchRunID     uint64
-	progressMu      sync.RWMutex
-	progress        model.IndexProgress
+	store            *storage.Store
+	indexer          *indexer.Indexer
+	extractor        extract.Extractor
+	browsers         []model.DataAdapter
+	startedAt        time.Time
+	maxBytes         int64
+	indexMu          sync.Mutex
+	runMu            sync.Mutex
+	indexRunCancel   context.CancelFunc
+	syncRunCancel    context.CancelFunc
+	searchRunCancel  context.CancelFunc
+	searchRunID      uint64
+	contentRunMu     sync.Mutex
+	contentRunCancel context.CancelFunc
+	contentRunID     uint64
+	contentPaused    atomic.Bool
+	progressMu       sync.RWMutex
+	progress         model.IndexProgress
+	progressRunSeq   atomic.Uint64
+	activeProgressID atomic.Uint64
 	// lock-free counters updated during scanning; read back in IndexProgress.
 	progressTotal   atomic.Int64
 	progressScanned atomic.Int64
@@ -107,7 +118,9 @@ func New(ctx context.Context, cfg Config) (*Engine, error) {
 	// Restore previously watched paths and perform incremental catch-up.
 	if watchedPaths, watchErr := store.GetWatchedPaths(ctx); watchErr == nil {
 		for _, root := range watchedPaths {
-			engine.addToWatcher(root)
+			if !isVolumeRoot(root) {
+				engine.addToWatcher(root)
+			}
 		}
 		if len(watchedPaths) > 0 {
 			// Delay catch-up so startup stays responsive and search can use existing index immediately.
@@ -136,6 +149,53 @@ func (e *Engine) scheduleWatchedResync(roots []string) {
 	}
 
 	e.resyncWatched(roots)
+}
+
+func (e *Engine) scheduleContentBackfill(root string, maxBytes int64) {
+	go func() {
+		timer := time.NewTimer(2 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-e.ctx.Done():
+			return
+		case <-timer.C:
+		}
+		e.backfillContent(root, maxBytes)
+	}()
+}
+
+func (e *Engine) backfillContent(root string, maxBytes int64) {
+	if e.ctx.Err() != nil {
+		return
+	}
+	runCtx, cancel := context.WithCancel(e.ctx)
+	e.contentRunMu.Lock()
+	if e.contentRunCancel != nil {
+		e.contentRunCancel()
+	}
+	e.contentRunID++
+	runID := e.contentRunID
+	e.contentRunCancel = cancel
+	e.contentRunMu.Unlock()
+	defer func() {
+		cancel()
+		e.contentRunMu.Lock()
+		if e.contentRunID == runID {
+			e.contentRunCancel = nil
+		}
+		e.contentRunMu.Unlock()
+	}()
+
+	pathKey := contentPathSyncKey(root)
+	lastSync, _ := e.store.GetSyncTime(runCtx, pathKey)
+	if lastSync > 0 {
+		lastSync--
+	}
+	adapter := adapters.NewFileAdapter([]string{root}, e.extractor, maxBytes)
+	adapter.ContentOnly = true
+	if _, err := e.syncFileAdapter(runCtx, adapter, lastSync, pathKey); err != nil {
+		log.Printf("content backfill %s: %v", root, err)
+	}
 }
 
 // Close releases engine resources.
@@ -229,6 +289,7 @@ func (e *Engine) IndexPath(ctx context.Context, req model.IndexPathRequest) (mod
 	}
 	e.indexMu.Lock()
 	defer e.indexMu.Unlock()
+	e.cancelContentBackfill()
 
 	maxBytes := e.maxBytes
 	if req.MaxBytes > 0 {
@@ -243,9 +304,16 @@ func (e *Engine) IndexPath(ctx context.Context, req model.IndexPathRequest) (mod
 	defer cancel()
 
 	adapter := adapters.NewFileAdapter([]string{req.Path}, e.extractor, maxBytes)
+	volumeRoot := isVolumeRoot(req.Path)
+	adapter.PathOnly = volumeRoot
 	summary, err := e.syncFileAdapter(runCtx, adapter, lastSync, pathKey)
 	if err == nil {
-		e.enableWatch(ctx, req.Path)
+		if volumeRoot {
+			_ = e.store.AddWatchedPath(ctx, req.Path)
+			e.scheduleContentBackfill(req.Path, maxBytes)
+		} else {
+			e.enableWatch(ctx, req.Path)
+		}
 	}
 	return summary, err
 }
@@ -264,10 +332,48 @@ func (e *Engine) CancelIndexPath(ctx context.Context) (map[string]any, error) {
 	return map[string]any{"ok": true, "canceled": true}, nil
 }
 
+func (e *Engine) cancelContentBackfill() {
+	e.contentRunMu.Lock()
+	cancel := e.contentRunCancel
+	e.contentRunMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// PauseContentIndex pauses the background full-text backfill at the next
+// cooperative checkpoint. Search and foreground file indexing remain usable.
+func (e *Engine) PauseContentIndex(ctx context.Context) (map[string]any, error) {
+	_ = ctx
+	e.contentPaused.Store(true)
+	e.progressMu.Lock()
+	if e.progress.Active && e.progress.Kind == "content" {
+		e.progress.Phase = "paused"
+		e.progress.UpdatedAt = time.Now().UnixMilli()
+	}
+	e.progressMu.Unlock()
+	return map[string]any{"ok": true, "paused": true}, nil
+}
+
+// ResumeContentIndex resumes a paused background full-text backfill.
+func (e *Engine) ResumeContentIndex(ctx context.Context) (map[string]any, error) {
+	_ = ctx
+	e.contentPaused.Store(false)
+	e.progressMu.Lock()
+	if e.progress.Active && e.progress.Kind == "content" && e.progress.Phase == "paused" {
+		e.progress.Phase = "scanning"
+		e.progress.UpdatedAt = time.Now().UnixMilli()
+	}
+	e.progressMu.Unlock()
+	return map[string]any{"ok": true, "paused": false}, nil
+}
+
 // SyncBrowsers indexes local browser history from supported profiles.
 func (e *Engine) SyncBrowsers(ctx context.Context) ([]model.SyncSummary, error) {
 	e.indexMu.Lock()
 	defer e.indexMu.Unlock()
+	e.cancelContentBackfill()
+
 	runCtx, cancel := context.WithCancel(ctx)
 	e.setSyncRunCancel(cancel)
 	defer e.setSyncRunCancel(nil)
@@ -421,63 +527,32 @@ func (e *Engine) syncFileAdapter(
 	var maxUpdated int64
 
 	maxWorkers := fileIndexMaxWorkers()
-	e.startProgress(strings.Join(adapter.Roots, ", "), maxWorkers)
+	if adapter.ContentOnly {
+		maxWorkers = contentBackfillMaxWorkers()
+	}
+	progressID := e.startProgress(progressKindForAdapter(adapter), strings.Join(adapter.Roots, ", "), maxWorkers)
 	fingerprints, err := e.store.LoadFileFingerprints(ctx, adapter.Roots)
 	if err != nil {
-		e.finishProgress(summary, err)
+		e.finishProgress(progressID, summary, err)
 		return summary, err
 	}
 
-	// Larger batches reduce SQLite commit overhead for big scans.
-	// 800 keeps write transactions short enough to not block search queries
-	// while significantly reducing per-file commit cost on HDD.
-	const batchSize = 800
-	batch := make([]storage.PreparedItem, 0, batchSize)
-
-	// Writer pipeline: a dedicated goroutine drains finished batches and
-	// commits them to SQLite while the collector keeps building the next one.
-	// This removes the serial stall where workers used to idle while the main
-	// loop was blocked inside a SQL commit.
-	batches := make(chan []storage.PreparedItem, 2)
-	writerDone := make(chan struct{})
-	var writerErr atomic.Pointer[error]
-	writerCtx, writerCancel := context.WithCancel(ctx)
-	defer writerCancel()
-	go func() {
-		defer close(writerDone)
-		for b := range batches {
-			if writerCtx.Err() != nil {
-				continue
-			}
-			if err := e.store.UpsertItems(writerCtx, b); err != nil {
-				writerErr.Store(&err)
-				writerCancel()
-				// Continue draining so the producer never blocks on send.
-				continue
-			}
-			e.addProgressWritten(len(b))
+	// BulkSession runs one writer goroutine per shard plus a dedicated
+	// main-DB writer. There is no per-batch barrier across shards, so the
+	// slowest shard never stalls the fast ones and the main-DB writer never
+	// blocks shard writers. This keeps sustained throughput high (target:
+	// 1000+ small files/sec) even after the index grows past tens of
+	// thousands of files.
+	session := e.store.BeginBulk(ctx, func(written int) {
+		e.addProgressWritten(progressID, written)
+	})
+	sessionClosed := false
+	closeSession := func() error {
+		if sessionClosed {
+			return nil
 		}
-	}()
-
-	getWriterErr := func() error {
-		if p := writerErr.Load(); p != nil {
-			return *p
-		}
-		return nil
-	}
-
-	flushBatch := func() error {
-		if len(batch) == 0 {
-			return getWriterErr()
-		}
-		out := batch
-		batch = make([]storage.PreparedItem, 0, batchSize)
-		select {
-		case <-writerCtx.Done():
-			return getWriterErr()
-		case batches <- out:
-			return getWriterErr()
-		}
+		sessionClosed = true
+		return session.Close()
 	}
 
 	workCtx, cancel := context.WithCancel(ctx)
@@ -518,6 +593,9 @@ func (e *Engine) syncFileAdapter(
 			}
 			for item := range paths {
 				if workCtx.Err() != nil {
+					return
+				}
+				if err := e.waitContentBackfillIfPaused(workCtx, adapter, progressID); err != nil {
 					return
 				}
 				entry, dataItem, ok := e.prepareFileCandidate(workCtx, adapter, item.candidate)
@@ -594,28 +672,41 @@ func (e *Engine) syncFileAdapter(
 		// Only update the worker count; do NOT call startProgress which would
 		// reset all counters and revert the phase back to "starting".
 		e.progressMu.Lock()
-		if e.progress.Active {
+		if e.activeProgressID.Load() == progressID && e.progress.Active {
 			e.progress.Workers = int(activeWorkers.Load())
 		}
 		e.progressMu.Unlock()
 	}()
 
 	go func() {
-		e.setProgressPhase("scanning")
+		e.setProgressPhase(progressID, "scanning")
 		err := adapter.WalkIncrementalCandidates(workCtx, lastSync, func(candidate adapters.FileCandidate) (bool, bool) {
+			if err := e.waitContentBackfillIfPaused(workCtx, adapter, progressID); err != nil {
+				return true, false
+			}
+			kind := e.fingerprintKindForCandidate(adapter, candidate)
+			if kind == "" {
+				fastSkipped.Add(1)
+				e.addProgressCandidate(progressID, candidate.Path)
+				e.addProgressCounts(progressID, 1, 0, 1)
+				return true, false
+			}
 			fp, ok := fingerprints[fingerprintPath(candidate.Path)]
 			if !ok {
 				return false, false
 			}
-			if fp.Size == candidate.Size && fp.ModTimeNS == candidate.ModTimeNS {
+			if fp.Size == candidate.Size && fp.ModTimeNS == candidate.ModTimeNS && fingerprintSatisfies(fp.ContentHash, kind) {
 				fastSkipped.Add(1)
-				e.addProgressCandidate(candidate.Path)
-				e.addProgressCounts(1, 0, 1)
+				e.addProgressCandidate(progressID, candidate.Path)
+				e.addProgressCounts(progressID, 1, 0, 1)
 				return true, true
 			}
 			return false, true
 		}, func(candidate adapters.FileCandidate) error {
-			e.addProgressCandidate(candidate.Path)
+			if err := e.waitContentBackfillIfPaused(workCtx, adapter, progressID); err != nil {
+				return err
+			}
+			e.addProgressCandidate(progressID, candidate.Path)
 			_, known := fingerprints[fingerprintPath(candidate.Path)]
 			select {
 			case <-workCtx.Done():
@@ -630,64 +721,61 @@ func (e *Engine) syncFileAdapter(
 		errCh <- err
 	}()
 
-	e.setProgressPhase("extracting")
+	e.setProgressPhase(progressID, "indexing")
 	for result := range prepared {
 		summary.Scanned++
 		if !result.ok {
 			summary.Skipped++
-			e.addProgressCounts(1, 0, 1)
+			e.addProgressCounts(progressID, 1, 0, 1)
 			continue
 		}
-		batch = append(batch, result.entry)
+		if err := session.Submit(result.entry); err != nil {
+			cancel()
+			_ = closeSession()
+			// Drain remaining prepared results to unblock workers.
+			for range prepared {
+			}
+			<-errCh
+			e.finishProgress(progressID, summary, err)
+			return summary, err
+		}
 		summary.Indexed++
-		e.addProgressCounts(1, 1, 0)
+		e.addProgressCounts(progressID, 1, 1, 0)
 		if result.item.UpdatedAt > maxUpdated {
 			maxUpdated = result.item.UpdatedAt
 		}
-		if len(batch) >= batchSize {
-			e.setProgressPhase("writing")
-			if err := flushBatch(); err != nil {
-				cancel()
-				writerCancel()
-				close(batches)
-				<-writerDone
-				e.finishProgress(summary, err)
-				return summary, err
+		if adapter.ContentOnly && summary.Indexed%256 == 0 {
+			select {
+			case <-workCtx.Done():
+			case <-time.After(10 * time.Millisecond):
 			}
-			e.setProgressPhase("extracting")
 		}
 	}
 	if err := <-errCh; err != nil {
-		writerCancel()
-		close(batches)
-		<-writerDone
-		e.finishProgress(summary, err)
+		_ = closeSession()
+		e.finishProgress(progressID, summary, err)
 		return summary, err
 	}
 	skippedUnchanged := int(fastSkipped.Load())
 	summary.Scanned += skippedUnchanged
 	summary.Skipped += skippedUnchanged
-	e.setProgressPhase("writing")
-	if err := flushBatch(); err != nil {
-		close(batches)
-		<-writerDone
-		e.finishProgress(summary, err)
-		return summary, err
-	}
-	close(batches)
-	<-writerDone
-	if err := getWriterErr(); err != nil {
-		e.finishProgress(summary, err)
+	// Bulk session Close runs the deferred FTS5 segment merge and WAL
+	// truncate on every shard. On large indexes this can take a few seconds
+	// after the last file is written — surface it so the UI doesn't appear
+	// frozen at 100%.
+	e.setProgressPhase(progressID, "finalizing")
+	if err := closeSession(); err != nil {
+		e.finishProgress(progressID, summary, err)
 		return summary, err
 	}
 	if maxUpdated > 0 {
 		if err := e.store.SetSyncTime(ctx, pathKey, maxUpdated); err != nil {
-			e.finishProgress(summary, err)
+			e.finishProgress(progressID, summary, err)
 			return summary, err
 		}
 	}
 	summary.ElapsedMS = float64(time.Since(start).Microseconds()) / 1000
-	e.finishProgress(summary, nil)
+	e.finishProgress(progressID, summary, nil)
 	return summary, nil
 }
 
@@ -697,6 +785,9 @@ func (e *Engine) prepareFileCandidate(
 	candidate adapters.FileCandidate,
 ) (storage.PreparedItem, model.DataItem, bool) {
 	if candidate.IsDir {
+		if adapter.ContentOnly {
+			return storage.PreparedItem{}, model.DataItem{}, false
+		}
 		item := pathOnlyItem(candidate, true)
 		chunks := pathOnlyChunks(item)
 		if len(chunks) == 0 {
@@ -705,12 +796,29 @@ func (e *Engine) prepareFileCandidate(
 		return storage.PreparedItem{
 			Item:        item,
 			Chunks:      chunks,
-			Fingerprint: fileFingerprint(candidate, chunks),
+			Fingerprint: fileFingerprint(candidate, chunks, fingerprintKindPath),
 		}, item, true
 	}
 
 	if !extract.SupportsIndexedPath(candidate.Path) {
 		return storage.PreparedItem{}, model.DataItem{}, false
+	}
+
+	if adapter.ContentOnly && !e.shouldIndexFileContent(adapter, candidate) {
+		return storage.PreparedItem{}, model.DataItem{}, false
+	}
+
+	if adapter.PathOnly {
+		item := pathOnlyItem(candidate, false)
+		chunks := pathOnlyChunks(item)
+		if len(chunks) == 0 {
+			return storage.PreparedItem{}, model.DataItem{}, false
+		}
+		return storage.PreparedItem{
+			Item:        item,
+			Chunks:      chunks,
+			Fingerprint: fileFingerprint(candidate, chunks, fingerprintKindPath),
+		}, item, true
 	}
 
 	if extract.SupportsPlainText(candidate.Path) {
@@ -722,7 +830,21 @@ func (e *Engine) prepareFileCandidate(
 		// behind the writer mutex) into N workers actually doing work in
 		// parallel. Large files fall through to the streaming path so we
 		// don't buffer hundreds of MB per worker.
-		if candidate.Size > 0 && candidate.Size <= eagerPlainTextThreshold {
+		if candidate.Size <= 0 || candidate.Size > e.contentSizeLimit(adapter) {
+			if adapter.ContentOnly {
+				return storage.PreparedItem{}, model.DataItem{}, false
+			}
+			chunks := pathOnlyChunks(item)
+			if len(chunks) == 0 {
+				return storage.PreparedItem{}, model.DataItem{}, false
+			}
+			return storage.PreparedItem{
+				Item:        item,
+				Chunks:      chunks,
+				Fingerprint: fileFingerprint(candidate, chunks, fingerprintKindPath),
+			}, item, true
+		}
+		if candidate.Size > 0 {
 			if chunks, ok := e.eagerChunkPlainText(ctx, item); ok {
 				if len(chunks) == 0 {
 					chunks = pathOnlyChunks(item)
@@ -733,19 +855,28 @@ func (e *Engine) prepareFileCandidate(
 				return storage.PreparedItem{
 					Item:        item,
 					Chunks:      chunks,
-					Fingerprint: fileFingerprint(candidate, chunks),
+					Fingerprint: fileFingerprint(candidate, chunks, fingerprintKindContent),
 				}, item, true
 			}
 		}
-		entry := storage.PreparedItem{
-			Item:        item,
-			ChunkSource: e.fileChunkSource(item),
-			Fingerprint: fileFingerprintBase(candidate),
+		if adapter.ContentOnly {
+			return storage.PreparedItem{}, model.DataItem{}, false
 		}
-		return entry, item, true
+		chunks := pathOnlyChunks(item)
+		if len(chunks) == 0 {
+			return storage.PreparedItem{}, model.DataItem{}, false
+		}
+		return storage.PreparedItem{
+			Item:        item,
+			Chunks:      chunks,
+			Fingerprint: fileFingerprint(candidate, chunks, fingerprintKindPath),
+		}, item, true
 	}
 
 	if !adapter.Extractor.Supports(candidate.Path) {
+		if adapter.ContentOnly {
+			return storage.PreparedItem{}, model.DataItem{}, false
+		}
 		item := pathOnlyItem(candidate, false)
 		chunks := pathOnlyChunks(item)
 		if len(chunks) == 0 {
@@ -754,12 +885,14 @@ func (e *Engine) prepareFileCandidate(
 		return storage.PreparedItem{
 			Item:        item,
 			Chunks:      chunks,
-			Fingerprint: fileFingerprint(candidate, chunks),
+			Fingerprint: fileFingerprint(candidate, chunks, fingerprintKindPath),
 		}, item, true
 	}
 
-	item, ok := adapter.ExtractFile(ctx, candidate.Path)
-	if !ok {
+	if candidate.Size <= 0 || candidate.Size > e.contentSizeLimit(adapter) {
+		if adapter.ContentOnly {
+			return storage.PreparedItem{}, model.DataItem{}, false
+		}
 		fallback := pathOnlyItem(candidate, false)
 		chunks := pathOnlyChunks(fallback)
 		if len(chunks) == 0 {
@@ -768,12 +901,32 @@ func (e *Engine) prepareFileCandidate(
 		return storage.PreparedItem{
 			Item:        fallback,
 			Chunks:      chunks,
-			Fingerprint: fileFingerprint(candidate, chunks),
+			Fingerprint: fileFingerprint(candidate, chunks, fingerprintKindPath),
+		}, fallback, true
+	}
+
+	item, ok := adapter.ExtractFile(ctx, candidate.Path)
+	if !ok {
+		if adapter.ContentOnly {
+			return storage.PreparedItem{}, model.DataItem{}, false
+		}
+		fallback := pathOnlyItem(candidate, false)
+		chunks := pathOnlyChunks(fallback)
+		if len(chunks) == 0 {
+			return storage.PreparedItem{}, model.DataItem{}, false
+		}
+		return storage.PreparedItem{
+			Item:        fallback,
+			Chunks:      chunks,
+			Fingerprint: fileFingerprint(candidate, chunks, fingerprintKindPath),
 		}, fallback, true
 	}
 	item.Metadata = ensureFileMetadata(item.Metadata, candidate, false)
 	chunks := e.indexer.PrepareItem(&item)
 	if chunks == nil {
+		if adapter.ContentOnly {
+			return storage.PreparedItem{}, model.DataItem{}, false
+		}
 		fallback := pathOnlyItem(candidate, false)
 		pathChunks := pathOnlyChunks(fallback)
 		if len(pathChunks) == 0 {
@@ -782,21 +935,64 @@ func (e *Engine) prepareFileCandidate(
 		return storage.PreparedItem{
 			Item:        fallback,
 			Chunks:      pathChunks,
-			Fingerprint: fileFingerprint(candidate, pathChunks),
+			Fingerprint: fileFingerprint(candidate, pathChunks, fingerprintKindPath),
 		}, fallback, true
 	}
 	return storage.PreparedItem{
 		Item:        item,
 		Chunks:      chunks,
-		Fingerprint: fileFingerprint(candidate, chunks),
+		Fingerprint: fileFingerprint(candidate, chunks, fingerprintKindContent),
 	}, item, true
 }
 
-// eagerPlainTextThreshold caps the size of files whose chunks are produced in
-// the worker (rather than streamed inside the writer's transaction). 2 MB
-// covers the vast majority of source/text files while keeping per-worker peak
-// memory bounded (workers * threshold).
-const eagerPlainTextThreshold int64 = 2 * 1024 * 1024
+// plainTextContentThreshold caps foreground full-content indexing. Larger text
+// files are indexed by filename/path first so whole-disk indexing keeps a
+// sustained files/sec rate instead of being dominated by tokenizing large blobs.
+const plainTextContentThreshold int64 = 64 * 1024
+
+// contentBackfillThreshold is larger because it runs after the fast pass in the
+// background. Files above this still keep their path index to avoid giant logs
+// or generated bundles monopolizing SQLite FTS writes.
+const contentBackfillThreshold int64 = 1024 * 1024
+
+func (e *Engine) contentSizeLimit(adapter *adapters.FileAdapter) int64 {
+	if adapter.ContentOnly {
+		return min(contentBackfillThreshold, adapter.MaxBytes)
+	}
+	return min(plainTextContentThreshold, adapter.MaxBytes)
+}
+
+func (e *Engine) shouldIndexFileContent(adapter *adapters.FileAdapter, candidate adapters.FileCandidate) bool {
+	if candidate.IsDir || adapter.PathOnly {
+		return false
+	}
+	if !extract.SupportsIndexedPath(candidate.Path) {
+		return false
+	}
+	if candidate.Size <= 0 || candidate.Size > e.contentSizeLimit(adapter) {
+		return false
+	}
+	if extract.SupportsPlainText(candidate.Path) {
+		return true
+	}
+	return adapter.Extractor.Supports(candidate.Path)
+}
+
+func (e *Engine) fingerprintKindForCandidate(adapter *adapters.FileAdapter, candidate adapters.FileCandidate) string {
+	if candidate.IsDir || adapter.PathOnly {
+		if adapter.ContentOnly {
+			return ""
+		}
+		return fingerprintKindPath
+	}
+	if e.shouldIndexFileContent(adapter, candidate) {
+		return fingerprintKindContent
+	}
+	if adapter.ContentOnly {
+		return ""
+	}
+	return fingerprintKindPath
+}
 
 // eagerChunkPlainText reads a plain-text file fully in the calling worker and
 // returns the prepared chunks. Returns (nil, false) if the file cannot be read.
@@ -970,16 +1166,47 @@ func fileIndexMaxWorkers() int {
 	if n <= 1 {
 		return 1
 	}
-	// Keep one core free for UI/OS and cap to avoid over-scheduling on
-	// high-core machines.
-	workers := n - 1
-	if workers > 12 {
-		workers = 12
+	workers := n
+	if workers > 24 {
+		workers = 24
 	}
 	return workers
 }
 
-func fileFingerprint(candidate adapters.FileCandidate, chunks []model.Chunk) *storage.FileFingerprint {
+func contentBackfillMaxWorkers() int {
+	n := runtime.NumCPU() / 2
+	if n < 2 {
+		return 2
+	}
+	if n > 6 {
+		return 6
+	}
+	return n
+}
+
+func (e *Engine) waitContentBackfillIfPaused(ctx context.Context, adapter *adapters.FileAdapter, progressID uint64) error {
+	if !adapter.ContentOnly {
+		return ctx.Err()
+	}
+	wasPaused := false
+	for e.contentPaused.Load() {
+		if !wasPaused {
+			e.setProgressPhase(progressID, "paused")
+			wasPaused = true
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	if wasPaused {
+		e.setProgressPhase(progressID, "scanning")
+	}
+	return ctx.Err()
+}
+
+func fileFingerprint(candidate adapters.FileCandidate, chunks []model.Chunk, kind string) *storage.FileFingerprint {
 	h := sha1.New()
 	for _, chunk := range chunks {
 		_, _ = h.Write([]byte(chunk.Hash))
@@ -988,15 +1215,18 @@ func fileFingerprint(candidate adapters.FileCandidate, chunks []model.Chunk) *st
 		Path:        candidate.Path,
 		Size:        candidate.Size,
 		ModTimeNS:   candidate.ModTimeNS,
-		ContentHash: hex.EncodeToString(h.Sum(nil)),
+		ContentHash: kind + hex.EncodeToString(h.Sum(nil)),
 	}
 }
 
-func fileFingerprintBase(candidate adapters.FileCandidate) *storage.FileFingerprint {
-	return &storage.FileFingerprint{
-		Path:      candidate.Path,
-		Size:      candidate.Size,
-		ModTimeNS: candidate.ModTimeNS,
+func fingerprintSatisfies(stored string, desired string) bool {
+	switch desired {
+	case fingerprintKindPath:
+		return strings.HasPrefix(stored, fingerprintKindPath) || strings.HasPrefix(stored, fingerprintKindContent)
+	case fingerprintKindContent:
+		return strings.HasPrefix(stored, fingerprintKindContent)
+	default:
+		return false
 	}
 }
 
@@ -1008,8 +1238,17 @@ func fingerprintPath(path string) string {
 	return strings.ToLower(filepath.ToSlash(filepath.Clean(absolute)))
 }
 
-func (e *Engine) startProgress(path string, workers int) {
+func progressKindForAdapter(adapter *adapters.FileAdapter) string {
+	if adapter.ContentOnly {
+		return "content"
+	}
+	return "fast"
+}
+
+func (e *Engine) startProgress(kind string, path string, workers int) uint64 {
 	now := time.Now()
+	progressID := e.progressRunSeq.Add(1)
+	e.activeProgressID.Store(progressID)
 	e.progressTotal.Store(0)
 	e.progressScanned.Store(0)
 	e.progressIndexed.Store(0)
@@ -1019,47 +1258,68 @@ func (e *Engine) startProgress(path string, workers int) {
 	defer e.progressMu.Unlock()
 	e.progress = model.IndexProgress{
 		Active:    true,
+		Kind:      kind,
 		Phase:     "starting",
 		Path:      path,
 		Workers:   workers,
 		StartedAt: now.UnixMilli(),
 		UpdatedAt: now.UnixMilli(),
 	}
+	return progressID
 }
 
-func (e *Engine) setProgressPhase(phase string) {
+func (e *Engine) setProgressPhase(progressID uint64, phase string) {
+	if e.activeProgressID.Load() != progressID {
+		return
+	}
 	e.progressMu.Lock()
 	defer e.progressMu.Unlock()
-	if !e.progress.Active {
+	if e.activeProgressID.Load() != progressID || !e.progress.Active {
 		return
 	}
 	e.progress.Phase = phase
 	e.progress.UpdatedAt = time.Now().UnixMilli()
 }
 
-func (e *Engine) addProgressCandidate(path string) {
+func (e *Engine) addProgressCandidate(progressID uint64, path string) {
+	if e.activeProgressID.Load() != progressID {
+		return
+	}
 	e.progressTotal.Add(1)
 	e.progressMu.Lock()
-	if e.progress.Active {
+	if e.activeProgressID.Load() == progressID && e.progress.Active {
 		e.progress.Current = path
 	}
 	e.progressMu.Unlock()
 }
 
-func (e *Engine) addProgressCounts(scanned, indexed, skipped int) {
+func (e *Engine) addProgressCounts(progressID uint64, scanned, indexed, skipped int) {
+	if e.activeProgressID.Load() != progressID {
+		return
+	}
 	e.progressScanned.Add(int64(scanned))
 	e.progressIndexed.Add(int64(indexed))
 	e.progressSkipped.Add(int64(skipped))
 }
 
-func (e *Engine) addProgressWritten(written int) {
+func (e *Engine) addProgressWritten(progressID uint64, written int) {
+	if e.activeProgressID.Load() != progressID {
+		return
+	}
 	e.progressWritten.Add(int64(written))
 }
 
-func (e *Engine) finishProgress(summary model.SyncSummary, err error) {
+func (e *Engine) finishProgress(progressID uint64, summary model.SyncSummary, err error) {
+	if e.activeProgressID.Load() != progressID {
+		return
+	}
 	now := time.Now()
 	e.progressMu.Lock()
 	defer e.progressMu.Unlock()
+	if e.activeProgressID.Load() != progressID {
+		return
+	}
+	e.activeProgressID.Store(0)
 	e.progress.Active = false
 	e.progress.Phase = "idle"
 	e.progress.Scanned = summary.Scanned
@@ -1229,10 +1489,14 @@ func (e *Engine) resyncWatched(roots []string) {
 		if lastSync > 0 {
 			lastSync--
 		}
+		volumeRoot := isVolumeRoot(root)
 		adapter := adapters.NewFileAdapter([]string{root}, e.extractor, e.maxBytes)
+		adapter.PathOnly = volumeRoot
 		_, err := e.syncFileAdapter(e.ctx, adapter, lastSync, pathKey)
 		if err != nil {
 			log.Printf("resync %s: %v", root, err)
+		} else if volumeRoot {
+			e.scheduleContentBackfill(root, e.maxBytes)
 		}
 		// Stagger roots so catch-up stays gentle in the background.
 		select {
@@ -1248,6 +1512,22 @@ func pathSyncKey(path string) string {
 	sum := sha256.Sum256([]byte(strings.ToLower(filepath.Clean(path))))
 	return "file:" + hex.EncodeToString(sum[:8])
 }
+
+func contentPathSyncKey(path string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(filepath.Clean(path))))
+	return "file-content:" + hex.EncodeToString(sum[:8])
+}
+
+func isVolumeRoot(path string) bool {
+	cleaned := filepath.Clean(path)
+	volume := filepath.VolumeName(cleaned)
+	if volume == "" {
+		return false
+	}
+	rest := strings.TrimPrefix(cleaned, volume)
+	return rest == "" || rest == string(filepath.Separator)
+}
+
 func defaultDBPath() string {
 	if path := os.Getenv("RECALL_DB_PATH"); path != "" {
 		return path

@@ -107,6 +107,7 @@ type SyncSummary struct {
 // IndexProgress is a live snapshot of the current indexing task.
 type IndexProgress struct {
 	Active        bool    `json:"active"`
+	Kind          string  `json:"kind,omitempty"`
 	Phase         string  `json:"phase"`
 	Path          string  `json:"path,omitempty"`
 	Current       string  `json:"current,omitempty"`

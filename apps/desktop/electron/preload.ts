@@ -6,6 +6,8 @@ const api = {
   cancelSearch: () => ipcRenderer.invoke('core:cancelSearch'),
   indexPath: (params: IndexPathParams) => ipcRenderer.invoke('core:indexPath', params),
   cancelIndex: () => ipcRenderer.invoke('core:cancelIndex'),
+  pauseContentIndex: () => ipcRenderer.invoke('core:pauseContentIndex'),
+  resumeContentIndex: () => ipcRenderer.invoke('core:resumeContentIndex'),
   cancelSyncBrowsers: () => ipcRenderer.invoke('core:cancelSyncBrowsers'),
   indexProgress: () => ipcRenderer.invoke('core:indexProgress'),
   syncBrowsers: () => ipcRenderer.invoke('core:syncBrowsers'),
@@ -37,6 +39,7 @@ export type IndexPathParams = {
 
 export type IndexProgress = {
   active: boolean;
+  kind?: 'fast' | 'content';
   phase: string;
   path?: string;
   current?: string;

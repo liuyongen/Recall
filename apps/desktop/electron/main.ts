@@ -181,6 +181,8 @@ function registerIpc(): void {
   ipcMain.handle('core:indexPath', (_event, params) => requestCore('index_path', params));
   ipcMain.handle('core:cancelIndex', () => requestCoreCancel('cancel_index'));
   ipcMain.handle('core:indexProgress', () => requestCore('index_progress'));
+  ipcMain.handle('core:pauseContentIndex', () => requestCore('pause_content_index'));
+  ipcMain.handle('core:resumeContentIndex', () => requestCore('resume_content_index'));
   ipcMain.handle('app:openPath', (_event, targetPath: string) => shell.openPath(targetPath));
   ipcMain.handle('app:openUrl', (_event, url: string) => shell.openExternal(url));
   ipcMain.handle('app:hide', () => hideWindow());
@@ -201,6 +203,12 @@ function registerIpc(): void {
 // Disable GPU shader disk cache to avoid access-denied errors when
 // the cache directory is locked by a previous process.
 app.commandLine.appendSwitch('disable-gpu-shader-disk-cache');
+
+// Override userData to a stable "recall" folder regardless of the npm
+// package name. Must be set before app.whenReady() so every subsequent
+// call to app.getPath('userData') — including the core-client — uses
+// the correct path.
+app.setPath('userData', path.join(app.getPath('appData'), 'recall'));
 
 app.whenReady().then(async () => {
   registerIpc();

@@ -7,6 +7,8 @@ import {
   Globe,
   HardDrive,
   Loader2,
+  Pause,
+  Play,
   Search,
   SlidersHorizontal,
   Square,
@@ -46,6 +48,7 @@ type Status = {
 
 type IndexProgress = {
   active: boolean;
+  kind?: 'fast' | 'content';
   phase: string;
   path?: string;
   current?: string;
@@ -108,7 +111,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!api || !indexing || cancellingIndex) {
+    if (!api) {
       return;
     }
 
@@ -125,7 +128,7 @@ export function App() {
     }
 
     void pollProgress();
-    const timer = window.setInterval(() => void pollProgress(), 300);
+    const timer = window.setInterval(() => void pollProgress(), indexing ? 300 : 1500);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -410,6 +413,25 @@ export function App() {
     }
   }
 
+  async function toggleContentIndex(progress: IndexProgress) {
+    if (!api || progress.kind !== 'content') {
+      return;
+    }
+    try {
+      if (progress.phase === 'paused') {
+        await api.resumeContentIndex();
+      } else {
+        await api.pauseContentIndex();
+      }
+      const next = await api.indexProgress().catch(() => null) as IndexProgress | null;
+      if (next) {
+        setIndexProgress(next);
+      }
+    } catch (error) {
+      setStatusAuto({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   async function syncBrowsers() {
     if (!api) {
       setStatusAuto({ kind: 'error', text: '请在 Electron 客户端中同步浏览器' });
@@ -556,7 +578,18 @@ export function App() {
             </div>
             <div className="statusCluster">
               {visibleIndexProgress ? (
-                <IndexProgressView progress={visibleIndexProgress} />
+                <>
+                  <IndexProgressView progress={visibleIndexProgress} />
+                  {visibleIndexProgress.kind === 'content' ? (
+                    <button
+                      className="progressIconButton"
+                      title={visibleIndexProgress.phase === 'paused' ? '继续全文索引' : '暂停全文索引'}
+                      onClick={() => void toggleContentIndex(visibleIndexProgress)}
+                    >
+                      {visibleIndexProgress.phase === 'paused' ? <Play size={13} /> : <Pause size={13} />}
+                    </button>
+                  ) : null}
+                </>
               ) : status.text ? (
                 <span className={status.kind}>{status.text}</span>
               ) : null}
@@ -741,14 +774,18 @@ function formatIndexProgress(progress: IndexProgress) {
     scanning: '扫描文件',
     extracting: '抽取文本',
     writing: '写入索引',
+    indexing: '写入索引',
+    finalizing: '整理索引',
+    paused: '已暂停',
     idle: '索引完成'
   };
+  const kind = progress.kind === 'content' ? '全文索引' : '文件索引';
   const total = progress.total > 0 ? `/${progress.total}` : '';
   const speed = progress.files_per_sec > 0 ? ` · ${progress.files_per_sec.toFixed(1)} 文件/秒` : '';
   const eta = progress.eta_ms > 0 ? ` · ETA ${formatDuration(progress.eta_ms)}` : '';
   const workers = progress.workers > 0 ? ` · ${progress.workers} workers` : '';
   const current = progress.current ? ` · ${basename(progress.current)}` : '';
-  return `${phaseLabels[progress.phase] ?? '正在索引'} · ${progress.scanned}${total} · 写入 ${progress.written} · 跳过 ${progress.skipped}${speed}${eta}${workers}${current}`;
+  return `${kind} · ${phaseLabels[progress.phase] ?? '正在索引'} · ${progress.scanned}${total} · 写入 ${progress.written} · 跳过 ${progress.skipped}${speed}${eta}${workers}${current}`;
 }
 
 function IndexProgressView({ progress }: { progress: IndexProgress }) {
@@ -756,9 +793,8 @@ function IndexProgressView({ progress }: { progress: IndexProgress }) {
   const scanned = Math.max(0, progress.scanned);
   const ratio = total > 0 ? Math.min(1, scanned / total) : null;
   const percent = ratio === null ? null : Math.round(ratio * 100);
-  const phase = progressPhaseLabel(progress.phase);
-  const current = progress.current ? basename(progress.current) : '';
-  const animated = progress.active && progress.phase !== 'idle';
+  const summary = progressSummaryLabel(progress, scanned, total, percent);
+  const animated = progress.active && progress.phase !== 'idle' && progress.phase !== 'paused';
   const isStarting = progress.phase === 'starting';
   const fillWidth = ratio === null ? '28%' : `${Math.max(2, ratio * 100)}%`;
   const barClass = ratio === null
@@ -769,11 +805,7 @@ function IndexProgressView({ progress }: { progress: IndexProgress }) {
   return (
     <div className="indexProgress" title={formatIndexProgress(progress)}>
       <div className="indexProgressTop">
-        <span className="indexPhase">{phase}</span>
-        {!isStarting && <span>{total > 0 ? `${scanned}/${total}` : `已扫描 ${scanned}`}</span>}
-        {percent !== null ? <span>{percent}%</span> : null}
-        {progress.files_per_sec > 0 ? <span>{progress.files_per_sec.toFixed(1)} 文件/秒</span> : null}
-        {progress.eta_ms > 0 ? <span>ETA {formatDuration(progress.eta_ms)}</span> : null}
+        <span>{summary}</span>
       </div>
       {!isStarting ? (
         <div className={barClass} style={barStyle} aria-hidden="true">
@@ -791,20 +823,36 @@ function IndexProgressView({ progress }: { progress: IndexProgress }) {
           <div className="indexProgressFill" style={{ width: '0%' }} />
         </div>
       )}
-      {current ? <div className="indexCurrent">{current}</div> : null}
     </div>
   );
 }
 
-function progressPhaseLabel(phase: string) {
+function progressSummaryLabel(progress: IndexProgress, scanned: number, total: number, percent: number | null) {
   const phaseLabels: Record<string, string> = {
     starting: '准备索引',
     scanning: '扫描文件',
     extracting: '抽取文本',
     writing: '写入索引',
+    indexing: '写入索引',
+    finalizing: '整理索引',
+    paused: '已暂停',
     idle: '索引完成'
   };
-  return phaseLabels[phase] ?? '正在索引';
+  const prefix = progress.kind === 'content' ? '全文索引' : '文件索引';
+  const parts = [`${prefix} · ${phaseLabels[progress.phase] ?? '正在索引'}`];
+  if (progress.phase !== 'starting') {
+    parts.push(total > 0 ? `${scanned}/${total}` : `已扫描 ${scanned}`);
+  }
+  if (percent !== null) {
+    parts.push(`${percent}%`);
+  }
+  if (progress.files_per_sec > 0) {
+    parts.push(`${progress.files_per_sec.toFixed(1)} 文件/秒`);
+  }
+  if (progress.eta_ms > 0) {
+    parts.push(`ETA ${formatDuration(progress.eta_ms)}`);
+  }
+  return parts.join('  ');
 }
 
 function basename(path: string) {

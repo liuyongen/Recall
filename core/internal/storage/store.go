@@ -22,6 +22,7 @@ import (
 )
 
 const cjkLayeredFTSTable = "chunk_cjk_layered_fts"
+const noCJKGrams = "\x00"
 
 // Config holds SQLite store settings.
 type Config struct {
@@ -172,80 +173,27 @@ func (s *Store) UpsertItem(ctx context.Context, item model.DataItem, chunks []mo
 }
 
 // UpsertItems applies a batch of items by fan-out: each shard writes its
-// assigned chunks in true parallel, then the main DB receives all item rows
-// and fingerprints in a single transaction.
-//
-// Failure ordering: shards are committed first; if any shard fails, the main
-// DB is left untouched so the next sync re-extracts the affected items. A
-// successful per-item retry will pre-delete any orphan chunks via the IsNew
-// path inside the shard.
+// assigned chunks AND fingerprints in one transaction, fully in parallel.
+// There is no main-DB step — the items table has been removed and
+// fingerprints now live inside each shard (sharded by the same key as the
+// file's chunks).
 func (s *Store) UpsertItems(ctx context.Context, entries []PreparedItem) error {
 	if len(entries) == 0 {
 		return nil
 	}
 
-	// 1. Group entries by their assigned shard.
 	groups := make([][]PreparedItem, len(s.shards))
 	for _, entry := range entries {
 		idx := pickShard(entry.Item.Source, entry.Item.ID)
 		groups[idx] = append(groups[idx], entry)
 	}
 
-	// 2. Run shard writes in parallel and collect hash updates from
-	//    streaming-source entries (those finalise their fingerprint hash
-	//    only once all chunks have been emitted).
-	var (
-		hashMu  sync.Mutex
-		hashUpd = make(map[string]string, len(entries))
-	)
-	keyFor := func(source, id string) string { return source + "\x00" + id }
-
-	if err := runShardsParallel(s.shards, func(sh *chunkShard) error {
+	return runShardsParallel(s.shards, func(sh *chunkShard) error {
 		group := groups[sh.idx]
 		if len(group) == 0 {
 			return nil
 		}
-		updates, err := sh.writeEntries(ctx, group)
-		if err != nil {
-			return err
-		}
-		if len(updates) > 0 {
-			hashMu.Lock()
-			for _, u := range updates {
-				hashUpd[keyFor(u.Source, u.ItemID)] = u.Hash
-			}
-			hashMu.Unlock()
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-
-	// 3. Write items + fingerprints to the main DB in one transaction.
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	return retryBusy(ctx, func() (err error) {
-		tx, err := s.writeDB.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer rollbackUnlessDone(tx, &err)
-
-		for _, entry := range entries {
-			if err = upsertItem(ctx, tx, entry.Item); err != nil {
-				return err
-			}
-			if entry.Fingerprint != nil {
-				fp := *entry.Fingerprint
-				if h, ok := hashUpd[keyFor(entry.Item.Source, entry.Item.ID)]; ok {
-					fp.ContentHash = h
-				}
-				if err = upsertFileFingerprint(ctx, tx, fp); err != nil {
-					return err
-				}
-			}
-		}
-		return tx.Commit()
+		return sh.writeEntries(ctx, group)
 	})
 }
 
@@ -400,13 +348,13 @@ ON CONFLICT(adapter_id) DO UPDATE SET
 }
 
 // LoadFileFingerprints returns known file signatures under the provided roots.
-// All roots are queried in a single SQL statement to avoid per-root round-trips.
+// Fingerprints live inside each shard now (same shard as the file's chunks),
+// so this fans the query out to every shard in parallel.
 func (s *Store) LoadFileFingerprints(ctx context.Context, roots []string) (map[string]FileFingerprint, error) {
 	if len(roots) == 0 {
 		return map[string]FileFingerprint{}, nil
 	}
 
-	// Build a single query: exact match OR LIKE for each root.
 	clauses := make([]string, 0, len(roots)*2)
 	args := make([]any, 0, len(roots)*2)
 	for _, root := range roots {
@@ -415,28 +363,52 @@ func (s *Store) LoadFileFingerprints(ctx context.Context, roots []string) (map[s
 		clauses = append(clauses, "path = ?", "path LIKE ?")
 		args = append(args, normalizedRoot, likeRoot)
 	}
+	query := "SELECT path, size, mod_time_ns, content_hash FROM file_fingerprints WHERE " +
+		strings.Join(clauses, " OR ")
 
-	rows, err := s.db.QueryContext(ctx,
-		"SELECT path, size, mod_time_ns, content_hash FROM file_fingerprints WHERE "+strings.Join(clauses, " OR "),
-		args...,
-	)
-	if err != nil {
-		return nil, err
+	type shardResult struct {
+		rows []FileFingerprint
+		err  error
 	}
-	defer rows.Close()
+	results := make([]shardResult, len(s.shards))
+	var wg sync.WaitGroup
+	for i, sh := range s.shards {
+		wg.Add(1)
+		go func(i int, sh *chunkShard) {
+			defer wg.Done()
+			rows, err := sh.db.QueryContext(ctx, query, args...)
+			if err != nil {
+				results[i].err = err
+				return
+			}
+			defer rows.Close()
+			for rows.Next() {
+				if err := ctx.Err(); err != nil {
+					results[i].err = err
+					return
+				}
+				var fp FileFingerprint
+				if err := rows.Scan(&fp.Path, &fp.Size, &fp.ModTimeNS, &fp.ContentHash); err != nil {
+					results[i].err = err
+					return
+				}
+				results[i].rows = append(results[i].rows, fp)
+			}
+			results[i].err = rows.Err()
+		}(i, sh)
+	}
+	wg.Wait()
 
 	fingerprints := make(map[string]FileFingerprint)
-	for rows.Next() {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+	for _, r := range results {
+		if r.err != nil {
+			return nil, r.err
 		}
-		var fp FileFingerprint
-		if err := rows.Scan(&fp.Path, &fp.Size, &fp.ModTimeNS, &fp.ContentHash); err != nil {
-			return nil, err
+		for _, fp := range r.rows {
+			fingerprints[fp.Path] = fp
 		}
-		fingerprints[fp.Path] = fp
 	}
-	return fingerprints, rows.Err()
+	return fingerprints, nil
 }
 
 // configure applies SQLite pragmas to the given connection pool.
@@ -480,12 +452,18 @@ func (s *Store) WarmCache(ctx context.Context) {
 // versions are dropped so a clean rebuild populates the shards.
 func (s *Store) migrate(ctx context.Context) error {
 	// Drop any legacy chunks/FTS tables from the main DB. They used to live
-	// here before sharding; now the main DB only stores items/fingerprints/
-	// state. A clean rebuild via re-indexing repopulates the shards.
+	// here before sharding; now the main DB only stores sync_state and
+	// watched_paths. A clean rebuild via re-indexing repopulates the shards.
 	legacyDrops := []string{
 		"DROP TABLE IF EXISTS chunk_fts",
 		"DROP TABLE IF EXISTS " + cjkLayeredFTSTable,
 		"DROP TABLE IF EXISTS chunks",
+		// items was never read by any query — pure write amplification.
+		// file_fingerprints moved into per-shard databases so each file's
+		// chunks + fingerprint commit together in one transaction, removing
+		// the cross-shard barrier and the single main-DB writer bottleneck.
+		"DROP TABLE IF EXISTS items",
+		"DROP TABLE IF EXISTS file_fingerprints",
 	}
 	for _, stmt := range legacyDrops {
 		if _, err := s.writeDB.ExecContext(ctx, stmt); err != nil {
@@ -494,18 +472,6 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 
 	statements := []string{
-		`CREATE TABLE IF NOT EXISTS items (
-			source TEXT NOT NULL,
-			id TEXT NOT NULL,
-			title TEXT NOT NULL,
-			preview TEXT NOT NULL,
-			path TEXT NOT NULL DEFAULT '',
-			file_type TEXT NOT NULL DEFAULT '',
-			metadata_json TEXT NOT NULL,
-			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL,
-			PRIMARY KEY(source, id)
-		)`,
 		`CREATE TABLE IF NOT EXISTS sync_state (
 			adapter_id TEXT PRIMARY KEY,
 			last_sync_time INTEGER NOT NULL,
@@ -515,13 +481,6 @@ func (s *Store) migrate(ctx context.Context) error {
 			path TEXT PRIMARY KEY,
 			added_at INTEGER NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS file_fingerprints (
-			path TEXT PRIMARY KEY,
-			size INTEGER NOT NULL,
-			mod_time_ns INTEGER NOT NULL,
-			content_hash TEXT NOT NULL,
-			updated_at INTEGER NOT NULL
-		)`,
 	}
 
 	for _, statement := range statements {
@@ -530,31 +489,6 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 	}
 	return nil
-}
-
-// upsertItem writes item-level metadata without duplicating full content.
-func upsertItem(ctx context.Context, tx *sql.Tx, item model.DataItem) error {
-	meta, err := encodeMetadata(item.Metadata)
-	if err != nil {
-		return err
-	}
-
-	pathValue, _ := item.Metadata["path"].(string)
-	fileType, _ := item.Metadata["file_type"].(string)
-	_, err = tx.ExecContext(ctx, `
-INSERT INTO items(source, id, title, preview, path, file_type, metadata_json, created_at, updated_at)
-VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(source, id) DO UPDATE SET
-  title = excluded.title,
-  preview = excluded.preview,
-  path = excluded.path,
-  file_type = excluded.file_type,
-  metadata_json = excluded.metadata_json,
-  updated_at = excluded.updated_at`,
-		item.Source, item.ID, item.Title, item.Preview, pathValue, fileType,
-		meta, item.CreatedAt, item.UpdatedAt,
-	)
-	return err
 }
 
 // applyChunkDiff performs delete, replace, and insert operations atomically.
@@ -670,6 +604,9 @@ func deleteFTS(ctx context.Context, tx *sql.Tx, old model.Chunk) error {
 // insertCJK stores generated CJK bigrams for substring search.
 func insertCJK(ctx context.Context, tx *sql.Tx, rowID int64, chunk model.Chunk) error {
 	grams := chunk.CJKGrams
+	if grams == noCJKGrams {
+		return nil
+	}
 	if grams == "" {
 		grams = cjkGrams(cjkIndexText(chunk))
 	}
@@ -709,6 +646,9 @@ func cjkIndexText(chunk model.Chunk) string {
 // can store the result in Chunk.CJKGrams to skip the CPU work inside the
 // writer's transaction.
 func PrecomputeCJKGrams(chunk model.Chunk) string {
+	if isASCII(chunk.Title) && isASCII(chunk.Content) && isASCII(chunk.Preview) {
+		return noCJKGrams
+	}
 	return cjkGrams(cjkIndexText(chunk))
 }
 
@@ -746,23 +686,6 @@ UPDATE chunks SET chunk_id = ?, title = ?, content = ?, preview = ?, hash = ?,
 WHERE rowid = ?`,
 		chunk.ChunkID, chunk.Title, chunk.Content, chunk.Preview, chunk.Hash,
 		chunk.Path, chunk.FileType, meta, chunk.CreatedAt, chunk.UpdatedAt, rowID,
-	)
-	return err
-}
-
-func upsertFileFingerprint(ctx context.Context, tx *sql.Tx, fp FileFingerprint) error {
-	if fp.Path == "" {
-		return nil
-	}
-	_, err := tx.ExecContext(ctx, `
-INSERT INTO file_fingerprints(path, size, mod_time_ns, content_hash, updated_at)
-VALUES(?, ?, ?, ?, ?)
-ON CONFLICT(path) DO UPDATE SET
-  size = excluded.size,
-  mod_time_ns = excluded.mod_time_ns,
-  content_hash = excluded.content_hash,
-  updated_at = excluded.updated_at`,
-		normalizeFingerprintPath(fp.Path), fp.Size, fp.ModTimeNS, fp.ContentHash, time.Now().Unix(),
 	)
 	return err
 }
@@ -1528,6 +1451,9 @@ func cjkGrams(input string) string {
 
 // cjkGramList generates unique CJK unigrams and bigrams from contiguous runs.
 func cjkGramList(input string) []string {
+	if isASCII(input) {
+		return nil
+	}
 	seen := make(map[string]struct{})
 	terms := make([]string, 0, utf8.RuneCountInString(input)/2)
 	emit := func(term string) {
@@ -1568,6 +1494,15 @@ func isCJK(r rune) bool {
 	return (r >= 0x3400 && r <= 0x4DBF) ||
 		(r >= 0x4E00 && r <= 0x9FFF) ||
 		(r >= 0xF900 && r <= 0xFAFF)
+}
+
+func isASCII(input string) bool {
+	for i := 0; i < len(input); i++ {
+		if input[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
 }
 
 // quoteMatch escapes a generated token for FTS MATCH syntax.

@@ -187,32 +187,31 @@ input {
 
 .indexProgress {
   display: grid;
-  width: min(360px, 100%);
+  width: min(520px, 100%);
   min-width: 0;
-  gap: 3px;
+  gap: 4px;
   color: #666;
 }
 
 .indexProgressTop {
-  display: flex;
+  display: block;
   min-width: 0;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 7px;
   overflow: hidden;
+  color: inherit;
+  font-weight: 400;
+  line-height: 1.25;
+  text-align: right;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .statusCluster .indexProgressTop span {
-  flex: 0 0 auto;
-  overflow: visible;
+  display: block;
+  min-width: 0;
+  overflow: hidden;
   color: inherit;
-  text-overflow: clip;
-}
-
-.statusCluster .indexProgressTop .indexPhase {
-  color: #3a3a3a;
-  font-weight: 600;
+  font-weight: inherit;
+  text-overflow: ellipsis;
 }
 
 .indexProgressBar {
@@ -260,14 +259,23 @@ input {
   background: #9a9a9a;
 }
 
-.indexCurrent {
-  min-width: 0;
-  overflow: hidden;
-  color: #999;
-  font-size: 11px;
-  text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.progressIconButton {
+  display: inline-grid;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #777;
+  cursor: pointer;
+}
+
+.progressIconButton:hover {
+  background: #f0f0f0;
+  color: #1a1a1a;
 }
 
 .sourcePanel {
@@ -668,14 +676,6 @@ input {
     );
   }
 
-  .statusCluster .indexProgressTop .indexPhase {
-    color: #d8d8d8;
-  }
-
-  .indexCurrent {
-    color: #666;
-  }
-
   .sourceSummary {
     color: #888;
   }
@@ -726,6 +726,15 @@ input {
   }
 
   .pathButton:hover {
+    color: #e8e8e8;
+  }
+
+  .progressIconButton {
+    color: #777;
+  }
+
+  .progressIconButton:hover {
+    background: #272727;
     color: #e8e8e8;
   }
 

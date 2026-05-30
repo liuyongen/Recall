@@ -65,6 +65,21 @@ func (c *Chunker) chooseEnd(runes []rune, start int) int {
 	return target
 }
 
+func (c *Chunker) chooseEndBytes(text []byte, start int) int {
+	target := min(start+c.Size, len(text))
+	if target >= len(text) {
+		return len(text)
+	}
+
+	floor := max(start+c.Size/2, target-220)
+	for i := target; i > floor; i-- {
+		if isBoundaryByte(text[i-1]) {
+			return i
+		}
+	}
+	return target
+}
+
 // makeChunk constructs a searchable chunk with stable metadata.
 func (c *Chunker) makeChunk(item model.DataItem, ordinal int, content string) model.Chunk {
 	hash := hashText(content)
@@ -97,6 +112,15 @@ func hashText(text string) string {
 func isBoundary(r rune) bool {
 	switch r {
 	case '\n', '.', '!', '?', ';', ':', '。', '！', '？', '；', '：':
+		return true
+	default:
+		return false
+	}
+}
+
+func isBoundaryByte(b byte) bool {
+	switch b {
+	case '\n', '.', '!', '?', ';', ':':
 		return true
 	default:
 		return false

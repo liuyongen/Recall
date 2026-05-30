@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"time"
 
 	"recall/core/internal/extract"
 	"recall/core/internal/model"
@@ -16,9 +18,11 @@ import (
 
 // FileAdapter indexes user-selected local files and directories.
 type FileAdapter struct {
-	Roots     []string
-	Extractor extract.Extractor
-	MaxBytes  int64
+	Roots       []string
+	Extractor   extract.Extractor
+	MaxBytes    int64
+	PathOnly    bool
+	ContentOnly bool
 }
 
 // FileCandidate is a cheap stat-derived file candidate for indexing.
@@ -151,74 +155,253 @@ func (a *FileAdapter) walkRootCandidates(
 	filter CandidateFilter,
 	visit func(FileCandidate) error,
 ) error {
-	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
+	info, err := os.Lstat(root)
+	if err != nil {
+		return nil
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil
+	}
+	if !info.IsDir() {
+		return a.visitFileCandidate(ctx, root, info, lastSyncTime, filter, visit)
+	}
+
+	walkCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	queue := newDirQueue()
+	queue.push(root)
+
+	var (
+		errMu    sync.Mutex
+		firstErr error
+		wg       sync.WaitGroup
+	)
+	setErr := func(err error) {
+		if err == nil {
+			return
 		}
-		if err != nil {
-			return nil
+		errMu.Lock()
+		if firstErr == nil {
+			firstErr = err
+			cancel()
+			queue.wake()
 		}
-		if d.Type()&os.ModeSymlink != 0 {
-			return nil
-		}
-		if ShouldSkipDir(path, d) {
-			return filepath.SkipDir
-		}
-		if d.IsDir() {
-			info, err := d.Info()
-			if err != nil {
-				return nil
+		errMu.Unlock()
+	}
+
+	workers := fileWalkWorkers()
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			for {
+				dir, ok := queue.pop(walkCtx)
+				if !ok {
+					return
+				}
+				a.scanCandidateDir(walkCtx, dir, lastSyncTime, filter, visit, queue, setErr)
+				queue.done()
 			}
-			candidate := FileCandidate{
-				Path:      path,
-				Size:      info.Size(),
-				ModTimeNS: info.ModTime().UnixNano(),
-				IsDir:     true,
+		}()
+	}
+	wg.Wait()
+
+	errMu.Lock()
+	defer errMu.Unlock()
+	if firstErr != nil {
+		return firstErr
+	}
+	return ctx.Err()
+}
+
+func (a *FileAdapter) scanCandidateDir(
+	ctx context.Context,
+	dir string,
+	lastSyncTime int64,
+	filter CandidateFilter,
+	visit func(FileCandidate) error,
+	queue *dirQueue,
+	setErr func(error),
+) {
+	if err := ctx.Err(); err != nil {
+		return
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		if entry.IsDir() {
+			if ShouldSkipDir(path, entry) {
+				continue
 			}
-			if filter != nil {
-				if skip, known := filter(candidate); skip {
-					return nil
-				} else if known {
-					return visit(candidate)
+			info, err := entry.Info()
+			if err == nil {
+				if err := visitCandidate(ctx, FileCandidate{
+					Path:      path,
+					Size:      info.Size(),
+					ModTimeNS: info.ModTime().UnixNano(),
+					IsDir:     true,
+				}, lastSyncTime, filter, visit); err != nil {
+					setErr(err)
+					return
 				}
 			}
-			if info.ModTime().Unix() <= lastSyncTime {
-				return nil
-			}
-			return visit(candidate)
+			queue.push(path)
+			continue
 		}
 
-		if shouldSkipFilePath(path) {
-			return nil
+		if shouldSkipFilePath(path) || shouldSkipFileName(entry.Name()) || !extract.SupportsIndexedPath(path) {
+			continue
 		}
-		if shouldSkipFileName(d.Name()) {
-			return nil
-		}
-		if !extract.SupportsIndexedPath(path) {
-			return nil
-		}
-		info, err := d.Info()
+		info, err := entry.Info()
 		if err != nil || info.IsDir() || info.Size() > a.MaxBytes {
-			return nil
+			continue
 		}
-		candidate := FileCandidate{
+		if err := visitCandidate(ctx, FileCandidate{
 			Path:      path,
 			Size:      info.Size(),
 			ModTimeNS: info.ModTime().UnixNano(),
 			IsDir:     false,
+		}, lastSyncTime, filter, visit); err != nil {
+			setErr(err)
+			return
 		}
-		if filter != nil {
-			if skip, known := filter(candidate); skip {
-				return nil
-			} else if known {
-				return visit(candidate)
-			}
-		}
-		if info.ModTime().Unix() <= lastSyncTime {
+	}
+}
+
+func (a *FileAdapter) visitFileCandidate(
+	ctx context.Context,
+	path string,
+	info os.FileInfo,
+	lastSyncTime int64,
+	filter CandidateFilter,
+	visit func(FileCandidate) error,
+) error {
+	if shouldSkipFilePath(path) || shouldSkipFileName(filepath.Base(path)) || !extract.SupportsIndexedPath(path) {
+		return nil
+	}
+	if info.Size() > a.MaxBytes {
+		return nil
+	}
+	return visitCandidate(ctx, FileCandidate{
+		Path:      path,
+		Size:      info.Size(),
+		ModTimeNS: info.ModTime().UnixNano(),
+		IsDir:     false,
+	}, lastSyncTime, filter, visit)
+}
+
+func visitCandidate(
+	ctx context.Context,
+	candidate FileCandidate,
+	lastSyncTime int64,
+	filter CandidateFilter,
+	visit func(FileCandidate) error,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if filter != nil {
+		if skip, known := filter(candidate); skip {
 			return nil
+		} else if known {
+			return visit(candidate)
 		}
-		return visit(candidate)
-	})
+	}
+	if timeFromNS(candidate.ModTimeNS) <= lastSyncTime {
+		return nil
+	}
+	return visit(candidate)
+}
+
+func timeFromNS(ns int64) int64 {
+	return ns / int64(time.Second)
+}
+
+func fileWalkWorkers() int {
+	workers := runtime.NumCPU() * 2
+	if workers < 4 {
+		return 4
+	}
+	if workers > 32 {
+		return 32
+	}
+	return workers
+}
+
+type dirQueue struct {
+	mu      sync.Mutex
+	cond    *sync.Cond
+	dirs    []string
+	head    int
+	active  int
+	stopped bool
+}
+
+func newDirQueue() *dirQueue {
+	q := &dirQueue{}
+	q.cond = sync.NewCond(&q.mu)
+	return q
+}
+
+func (q *dirQueue) push(path string) {
+	q.mu.Lock()
+	if !q.stopped {
+		q.dirs = append(q.dirs, path)
+		q.cond.Signal()
+	}
+	q.mu.Unlock()
+}
+
+func (q *dirQueue) pop(ctx context.Context) (string, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for q.head >= len(q.dirs) && q.active > 0 && !q.stopped && ctx.Err() == nil {
+		q.cond.Wait()
+	}
+	if q.stopped || ctx.Err() != nil || q.head >= len(q.dirs) {
+		q.stopped = true
+		q.cond.Broadcast()
+		return "", false
+	}
+	dir := q.dirs[q.head]
+	q.head++
+	if q.head > 4096 && q.head*2 > len(q.dirs) {
+		copy(q.dirs, q.dirs[q.head:])
+		q.dirs = q.dirs[:len(q.dirs)-q.head]
+		q.head = 0
+	}
+	q.active++
+	return dir, true
+}
+
+func (q *dirQueue) done() {
+	q.mu.Lock()
+	q.active--
+	if q.head >= len(q.dirs) && q.active == 0 {
+		q.stopped = true
+		q.cond.Broadcast()
+	} else {
+		q.cond.Signal()
+	}
+	q.mu.Unlock()
+}
+
+func (q *dirQueue) wake() {
+	q.mu.Lock()
+	q.stopped = true
+	q.cond.Broadcast()
+	q.mu.Unlock()
 }
 
 // extractFile extracts one changed file into a DataItem.
@@ -269,6 +452,9 @@ func ShouldSkipDir(path string, entry os.DirEntry) bool {
 	}
 	name := strings.ToLower(entry.Name())
 	if strings.HasPrefix(name, ".") {
+		return true
+	}
+	if strings.HasPrefix(name, "skin_") {
 		return true
 	}
 	if _, ok := skippedDirNames[name]; ok {
@@ -357,19 +543,48 @@ var skippedDirNames = map[string]struct{}{
 	".idea":                     {},
 	".vscode":                   {},
 	"__pycache__":               {},
+	"addons":                    {},
+	"assets":                    {},
 	"appdata":                   {},
 	"bin":                       {},
 	"build":                     {},
 	"cache":                     {},
 	"dist":                      {},
 	"dist-electron":             {},
+	"doc":                       {},
+	"docs":                      {},
+	"documentation":             {},
+	"example":                   {},
+	"examples":                  {},
+	"font":                      {},
+	"fonts":                     {},
+	"image":                     {},
+	"images":                    {},
+	"img":                       {},
+	"imgs":                      {},
 	"logs":                      {},
+	"mui":                       {},
 	"node_modules":              {},
 	"obj":                       {},
+	"office6":                   {},
 	"out":                       {},
+	"plugin":                    {},
+	"plugins":                   {},
+	"res":                       {},
+	"resource":                  {},
+	"resources":                 {},
+	"sample":                    {},
+	"samples":                   {},
+	"skin":                      {},
+	"skins":                     {},
+	"static":                    {},
 	"target":                    {},
+	"test":                      {},
+	"testdata":                  {},
+	"tests":                     {},
 	"temp":                      {},
 	"tmp":                       {},
+	"uxkit":                     {},
 	"vendor":                    {},
 	"venv":                      {},
 	"windows.old":               {},
@@ -415,9 +630,12 @@ var skippedPathFragments = []string{
 	"/appdata/roaming/code/cache/",
 	"/appdata/roaming/npm-cache/",
 	"/code cache/",
+	"/cocos2d-x-",
 	"/gpucache/",
 	"/jssdk/",
 	"/pip/cache/",
+	"/software/wps office/",
+	"/visual studio packages/",
 	"/software/dingding/",
 	"/software/dingtalk/",
 	"/software/feishu/",

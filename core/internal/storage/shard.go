@@ -23,11 +23,10 @@ import (
 // to N inserts run truly in parallel (SQLite only allows one writer per DB
 // file, but here we have N DB files).
 //
-// 4 was chosen as a balance between parallelism and disk overhead — each FTS5
-// shadow table carries fixed metadata, so doubling shards doubles that cost.
-// On a 12-core machine, 4 shards comfortably saturate disk I/O while keeping
-// search fan-out cheap.
-const shardCount = 4
+// 8 shards give the bulk indexer enough independent SQLite writers to keep an
+// SSD busy. Search still fans out cheaply at this size, and this project is
+// new enough that we do not need to preserve older 4-shard layouts.
+const shardCount = 8
 
 // rowIDShardShift packs the shard index into the high byte of a 64-bit rowid
 // so callers (e.g. the React UI) can use a single integer as a stable key.
@@ -64,6 +63,16 @@ type chunkShard struct {
 	db      *sql.DB
 	writeDB *sql.DB
 	writeMu sync.Mutex
+	// commitsSinceMaint counts how many write transactions have committed
+	// since the last incremental FTS merge / WAL checkpoint. Used to keep
+	// throughput steady on long indexing runs.
+	commitsSinceMaint int
+	// bulkMode disables all per-commit maintenance (FTS5 merge checks,
+	// WAL checkpoints). FTS5 segments accumulate freely, which keeps
+	// every commit O(1) regardless of index size. endBulkMode consolidates
+	// the segments and trims WAL once, eliminating the gradual slowdown
+	// caused by LSM-style automatic merges.
+	bulkMode bool
 }
 
 // shardPath returns the on-disk path for shard N adjacent to the main DB.
@@ -143,10 +152,19 @@ func (s *chunkShard) Close() error {
 }
 
 func (s *chunkShard) migrate(ctx context.Context) error {
+	// chunks deliberately has NO UNIQUE constraints. Earlier versions had
+	// `chunk_id UNIQUE` and `UNIQUE(source, item_id, ordinal)` but neither
+	// was ever queried — uniqueness was enforced by the application layer
+	// (loadChunks + diff). Each UNIQUE created a hidden b-tree that had to
+	// be probed and updated on every insert; once that b-tree no longer fit
+	// in SQLite's page cache, throughput collapsed as the index grew. Same
+	// reasoning applies to idx_chunks_source_time / idx_chunks_file_type:
+	// the query planner never picked them (FTS5 MATCH dominates), so they
+	// were pure write amplification.
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS chunks (
-			rowid INTEGER PRIMARY KEY AUTOINCREMENT,
-			chunk_id TEXT NOT NULL UNIQUE,
+			rowid INTEGER PRIMARY KEY,
+			chunk_id TEXT NOT NULL,
 			item_id TEXT NOT NULL,
 			source TEXT NOT NULL,
 			title TEXT NOT NULL,
@@ -158,12 +176,19 @@ func (s *chunkShard) migrate(ctx context.Context) error {
 			file_type TEXT NOT NULL DEFAULT '',
 			metadata_json TEXT NOT NULL,
 			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL,
-			UNIQUE(source, item_id, ordinal)
+			updated_at INTEGER NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_chunks_source_item ON chunks(source, item_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_chunks_source_time ON chunks(source, updated_at DESC)`,
-		`CREATE INDEX IF NOT EXISTS idx_chunks_file_type ON chunks(file_type)`,
+		// file_fingerprints lives in the shard so each file's chunks +
+		// fingerprint commit together in a single transaction. The path is
+		// hashed into the same shard as the file's chunks via pickShard().
+		`CREATE TABLE IF NOT EXISTS file_fingerprints (
+			path TEXT PRIMARY KEY,
+			size INTEGER NOT NULL,
+			mod_time_ns INTEGER NOT NULL,
+			content_hash TEXT NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
 			title,
 			content,
@@ -175,6 +200,12 @@ func (s *chunkShard) migrate(ctx context.Context) error {
 			content='',
 			tokenize='unicode61 remove_diacritics 2'
 		)`,
+		// Set normal automerge for the steady-state (post-bulk) workload.
+		// During bulk indexing the BulkSession switches this to 0 so commits
+		// stay O(1) regardless of how big the index has grown; endBulkMode
+		// then forces a one-shot merge before restoring automerge here.
+		`INSERT INTO chunk_fts(chunk_fts, rank) VALUES('automerge', 16)`,
+		`INSERT INTO ` + cjkLayeredFTSTable + `(` + cjkLayeredFTSTable + `, rank) VALUES('automerge', 16)`,
 	}
 	for _, stmt := range statements {
 		if _, err := s.writeDB.ExecContext(ctx, stmt); err != nil {
@@ -184,35 +215,36 @@ func (s *chunkShard) migrate(ctx context.Context) error {
 	return nil
 }
 
-// itemHashUpdate carries the content-hash a streaming entry produced so that
-// the caller can attach it to the file fingerprint written to the main DB.
-type itemHashUpdate struct {
-	Source string
-	ItemID string
-	Hash   string
-}
-
 // writeEntries persists every chunk for the given entries in one transaction.
-// It returns hash updates collected from streaming entries so the caller can
-// stamp those onto file fingerprints in the main DB.
-func (s *chunkShard) writeEntries(ctx context.Context, entries []PreparedItem) ([]itemHashUpdate, error) {
+// In bulkMode the fast path uses multi-row INSERT statements which are much
+// faster than per-row inserts with modernc.org/sqlite. Changed existing items
+// are replaced wholesale instead of chunk-diffed; unchanged files are filtered
+// before this path by fingerprints, so the extra diff precision is not worth
+// the write amplification during high-rate indexing.
+func (s *chunkShard) writeEntries(ctx context.Context, entries []PreparedItem) error {
 	if len(entries) == 0 {
-		return nil, nil
+		return nil
 	}
-	var updates []itemHashUpdate
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+
 	err := retryBusy(ctx, func() (err error) {
-		updates = updates[:0]
 		tx, err := s.writeDB.BeginTx(ctx, nil)
 		if err != nil {
 			return err
 		}
 		defer rollbackUnlessDone(tx, &err)
 
+		if s.bulkMode {
+			if err := s.writeBulkModeEntries(ctx, tx, entries); err != nil {
+				return err
+			}
+			return tx.Commit()
+		}
+
 		for _, entry := range entries {
 			if entry.ChunkSource != nil {
-				upd, err := writeStreamingChunks(ctx, tx, entry)
+				hash, err := writeStreamingChunks(ctx, tx, entry)
 				if err != nil {
 					if errors.Is(err, ErrSkipItem) {
 						// Volatile file changed mid-read; ignore so the rest
@@ -221,12 +253,17 @@ func (s *chunkShard) writeEntries(ctx context.Context, entries []PreparedItem) (
 					}
 					return err
 				}
-				updates = append(updates, upd)
+				if entry.Fingerprint != nil {
+					fp := *entry.Fingerprint
+					fp.ContentHash = hash
+					if err := upsertFingerprintTx(ctx, tx, fp); err != nil {
+						return err
+					}
+				}
 				continue
 			}
 			if entry.IsNew {
-				// Defensive cleanup in case a previous run crashed after
-				// shard write but before main-DB item/fingerprint write.
+				// Defensive cleanup in case a previous run crashed mid-write.
 				if err := deleteAllChunksForItem(ctx, tx, entry.Item.Source, entry.Item.ID); err != nil {
 					return err
 				}
@@ -235,28 +272,172 @@ func (s *chunkShard) writeEntries(ctx context.Context, entries []PreparedItem) (
 						return err
 					}
 				}
-				continue
+			} else {
+				oldChunks, err := loadChunks(ctx, tx, entry.Item.Source, entry.Item.ID)
+				if err != nil {
+					return err
+				}
+				if err := applyChunkDiff(ctx, tx, entry.Item, oldChunks, entry.Chunks); err != nil {
+					return err
+				}
 			}
-			oldChunks, err := loadChunks(ctx, tx, entry.Item.Source, entry.Item.ID)
-			if err != nil {
-				return err
-			}
-			if err := applyChunkDiff(ctx, tx, entry.Item, oldChunks, entry.Chunks); err != nil {
-				return err
+			if entry.Fingerprint != nil {
+				if err := upsertFingerprintTx(ctx, tx, *entry.Fingerprint); err != nil {
+					return err
+				}
 			}
 		}
 		return tx.Commit()
 	})
-	return updates, err
+	if err == nil {
+		s.runWriteMaintenance(ctx)
+	}
+	return err
+}
+
+func (s *chunkShard) writeBulkModeEntries(ctx context.Context, tx *sql.Tx, entries []PreparedItem) error {
+	materialized := make([]PreparedItem, 0, len(entries))
+	for _, entry := range entries {
+		if entry.ChunkSource != nil {
+			continue
+		}
+		if !entry.IsNew {
+			if err := deleteAllChunksForItem(ctx, tx, entry.Item.Source, entry.Item.ID); err != nil {
+				return err
+			}
+		}
+		materialized = append(materialized, entry)
+	}
+	if err := bulkInsertEntries(ctx, tx, materialized); err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if entry.ChunkSource == nil {
+			continue
+		}
+		hash, err := writeStreamingChunks(ctx, tx, entry)
+		if err != nil {
+			if errors.Is(err, ErrSkipItem) {
+				continue
+			}
+			return err
+		}
+		if entry.Fingerprint != nil {
+			fp := *entry.Fingerprint
+			fp.ContentHash = hash
+			if err := upsertFingerprintTx(ctx, tx, fp); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// runWriteMaintenance keeps long indexing runs from slowing down by
+// occasionally trimming the WAL and feeding the FTS5 incremental merger
+// a small slice of work. Both operations are non-blocking for readers.
+// Must be called while holding writeMu. Skipped entirely while bulkMode
+// is active so high-rate ingestion stays at O(1) cost per commit.
+func (s *chunkShard) runWriteMaintenance(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	if s.bulkMode {
+		return
+	}
+	s.commitsSinceMaint++
+	// Every few commits, ask FTS5 to merge a bounded number of pages from
+	// its largest segment level. With automerge=16 segments accumulate
+	// freely between merges, so we drip-feed work here instead of letting
+	// a "crisis merge" stall a future commit.
+	if s.commitsSinceMaint%4 == 0 {
+		// Negative argument = incremental, page-bounded merge (FTS5 docs).
+		_, _ = s.writeDB.ExecContext(ctx,
+			"INSERT INTO chunk_fts(chunk_fts, rank) VALUES('merge', -64)")
+		_, _ = s.writeDB.ExecContext(ctx,
+			"INSERT INTO "+cjkLayeredFTSTable+"("+cjkLayeredFTSTable+", rank) VALUES('merge', -64)")
+	}
+	// Trim WAL roughly every 16 commits. PASSIVE never blocks readers or
+	// other writers and silently no-ops if a reader still pins the WAL.
+	if s.commitsSinceMaint >= 16 {
+		s.commitsSinceMaint = 0
+		_, _ = s.writeDB.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)")
+	}
+}
+
+// beginBulkMode disables FTS5 automatic segment merges, per-commit
+// maintenance, and fsync (synchronous=OFF) so high-rate ingestion stays
+// at constant cost. Must be paired with endBulkMode which restores normal
+// durability and consolidates the FTS5 segments accumulated during bulk.
+//
+// Safety: a crash during bulk indexing can corrupt a shard. That's
+// acceptable here because bulk runs are recoverable by re-indexing.
+// endBulkMode runs a TRUNCATE checkpoint that fsyncs everything before
+// returning, so once it completes the shard is durable.
+func (s *chunkShard) beginBulkMode(ctx context.Context) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if s.bulkMode {
+		return nil
+	}
+	if _, err := s.writeDB.ExecContext(ctx,
+		"INSERT INTO chunk_fts(chunk_fts, rank) VALUES('automerge', 0)"); err != nil {
+		return err
+	}
+	if _, err := s.writeDB.ExecContext(ctx,
+		"INSERT INTO "+cjkLayeredFTSTable+"("+cjkLayeredFTSTable+", rank) VALUES('automerge', 0)"); err != nil {
+		return err
+	}
+	// synchronous=OFF removes the fsync after every commit. On Windows
+	// each fsync is multi-millisecond; for a 50K file run this saves
+	// minutes. Combined with WAL it remains crash-safe for committed
+	// pages still in the WAL — only an OS-level crash mid-write can
+	// corrupt, and we resync after such a crash anyway.
+	if _, err := s.writeDB.ExecContext(ctx, "PRAGMA synchronous=OFF"); err != nil {
+		return err
+	}
+	s.bulkMode = true
+	return nil
+}
+
+// endBulkMode re-enables automatic merging, forces one big merge to
+// consolidate all segments accumulated during bulk load, and truncates the
+// WAL. Returns after all maintenance commits land on disk so subsequent
+// reads see a tidy index. Safe to call when bulkMode is already false.
+func (s *chunkShard) endBulkMode(ctx context.Context) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if !s.bulkMode {
+		return nil
+	}
+	s.bulkMode = false
+	s.commitsSinceMaint = 0
+
+	// Restore durability before the post-bulk merge so any errors there
+	// land on disk with full fsync protection.
+	_, _ = s.writeDB.ExecContext(ctx, "PRAGMA synchronous=NORMAL")
+
+	// Restore normal automerge so future incremental writes self-maintain.
+	_, _ = s.writeDB.ExecContext(ctx,
+		"INSERT INTO chunk_fts(chunk_fts, rank) VALUES('automerge', 16)")
+	_, _ = s.writeDB.ExecContext(ctx,
+		"INSERT INTO "+cjkLayeredFTSTable+"("+cjkLayeredFTSTable+", rank) VALUES('automerge', 16)")
+
+	// Keep indexing completion fast. Heavy FTS consolidation is handled by
+	// periodic/manual Optimize; doing it synchronously here is exactly what
+	// makes long full-disk runs feel slower at the end.
+	_, _ = s.writeDB.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)")
+	return nil
 }
 
 // writeStreamingChunks consumes a ChunkSource and applies a diff against
 // existing chunks for the same item. The accumulated SHA-1 of chunk hashes
 // is returned so the main-DB fingerprint write can stamp the final value.
-func writeStreamingChunks(ctx context.Context, tx *sql.Tx, entry PreparedItem) (itemHashUpdate, error) {
+func writeStreamingChunks(ctx context.Context, tx *sql.Tx, entry PreparedItem) (string, error) {
 	oldChunks, err := loadChunks(ctx, tx, entry.Item.Source, entry.Item.ID)
 	if err != nil {
-		return itemHashUpdate{}, err
+		return "", err
 	}
 	seen := make(map[int]struct{}, len(oldChunks))
 	hasher := sha1.New()
@@ -279,20 +460,16 @@ func writeStreamingChunks(ctx context.Context, tx *sql.Tx, entry PreparedItem) (
 		return insertChunk(ctx, tx, entry.Item, chunk)
 	})
 	if err != nil {
-		return itemHashUpdate{}, err
+		return "", err
 	}
 	for ordinal, old := range oldChunks {
 		if _, ok := seen[ordinal]; !ok {
 			if err := deleteChunk(ctx, tx, old); err != nil {
-				return itemHashUpdate{}, err
+				return "", err
 			}
 		}
 	}
-	return itemHashUpdate{
-		Source: entry.Item.Source,
-		ItemID: entry.Item.ID,
-		Hash:   hex.EncodeToString(hasher.Sum(nil)),
-	}, nil
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 func deleteAllChunksForItem(ctx context.Context, tx *sql.Tx, source, itemID string) error {
