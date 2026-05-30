@@ -403,7 +403,10 @@ func (s *Store) configure(ctx context.Context, db *sql.DB) error {
 		"PRAGMA temp_store=MEMORY",
 		"PRAGMA mmap_size=30000000000",
 		"PRAGMA foreign_keys=ON",
-		"PRAGMA optimize",
+		// PRAGMA optimize is intentionally omitted here: it can block for
+		// hundreds of milliseconds on large databases and would delay the
+		// engine from serving the first search request. periodicOptimize
+		// handles this in the background every 30 minutes.
 	}
 	for _, pragma := range pragmas {
 		if _, err := db.ExecContext(ctx, pragma); err != nil {
@@ -411,6 +414,20 @@ func (s *Store) configure(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// WarmCache runs lightweight read queries that pull the FTS5 index root nodes
+// into SQLite's page cache. Call this once in a goroutine right after Open so
+// that the first real search hits warm pages instead of cold disk.
+func (s *Store) WarmCache(ctx context.Context) {
+	for _, table := range []string{"chunk_fts", cjkLayeredFTSTable} {
+		if ctx.Err() != nil {
+			return
+		}
+		// A COUNT(*) against the shadow tables forces SQLite to load the
+		// FTS5 index structure pages without returning large result sets.
+		_, _ = s.db.ExecContext(ctx, "SELECT COUNT(*) FROM "+table)
+	}
 }
 
 // migrate creates metadata, chunk, FTS, and sync-state tables.

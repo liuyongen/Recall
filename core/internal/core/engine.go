@@ -116,6 +116,9 @@ func New(ctx context.Context, cfg Config) (*Engine, error) {
 	}
 	go engine.watcherLoop()
 	go engine.periodicOptimize()
+	// Pre-warm the SQLite FTS5 page cache so the first user search hits
+	// in-memory pages rather than reading cold index segments from disk.
+	go store.WarmCache(engineCtx)
 
 	return engine, nil
 }
