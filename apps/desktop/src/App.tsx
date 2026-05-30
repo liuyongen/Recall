@@ -759,6 +759,7 @@ function IndexProgressView({ progress }: { progress: IndexProgress }) {
   const phase = progressPhaseLabel(progress.phase);
   const current = progress.current ? basename(progress.current) : '';
   const animated = progress.active && progress.phase !== 'idle';
+  const isStarting = progress.phase === 'starting';
   const fillWidth = ratio === null ? '28%' : `${Math.max(2, ratio * 100)}%`;
   const barClass = ratio === null
     ? `indexProgressBar pending${animated ? ' running' : ''}`
@@ -769,17 +770,27 @@ function IndexProgressView({ progress }: { progress: IndexProgress }) {
     <div className="indexProgress" title={formatIndexProgress(progress)}>
       <div className="indexProgressTop">
         <span className="indexPhase">{phase}</span>
-        {progress.phase !== 'starting' && <span>{total > 0 ? `${scanned}/${total}` : `已扫描 ${scanned}`}</span>}
+        {!isStarting && <span>{total > 0 ? `${scanned}/${total}` : `已扫描 ${scanned}`}</span>}
         {percent !== null ? <span>{percent}%</span> : null}
         {progress.files_per_sec > 0 ? <span>{progress.files_per_sec.toFixed(1)} 文件/秒</span> : null}
         {progress.eta_ms > 0 ? <span>ETA {formatDuration(progress.eta_ms)}</span> : null}
       </div>
-      <div className={barClass} style={barStyle} aria-hidden="true">
+      {!isStarting ? (
+        <div className={barClass} style={barStyle} aria-hidden="true">
+          <div
+            className={fillClass}
+            style={{ width: fillWidth }}
+          />
+        </div>
+      ) : (
         <div
-          className={fillClass}
-          style={{ width: fillWidth }}
-        />
-      </div>
+          className="indexProgressBar running"
+          style={{ ['--progress-width' as any]: '100%' } as CSSProperties}
+          aria-hidden="true"
+        >
+          <div className="indexProgressFill" style={{ width: '0%' }} />
+        </div>
+      )}
       {current ? <div className="indexCurrent">{current}</div> : null}
     </div>
   );

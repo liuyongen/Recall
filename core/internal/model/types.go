@@ -48,6 +48,11 @@ type Chunk struct {
 	Metadata  map[string]any
 	CreatedAt int64
 	UpdatedAt int64
+	// CJKGrams, when non-empty, is the pre-computed space-separated CJK bigram
+	// string for this chunk. If empty, the store will generate it at write
+	// time. Pre-computing in worker threads moves CPU work out of the writer's
+	// critical section.
+	CJKGrams string
 }
 
 // SearchRequest contains filters for a full-text search.

@@ -52,6 +52,9 @@ type PreparedItem struct {
 	Chunks      []model.Chunk
 	ChunkSource ChunkSource
 	Fingerprint *FileFingerprint
+	// IsNew indicates the item has never been indexed before. When true the
+	// store skips the existing-chunks query and goes straight to inserts.
+	IsNew bool
 }
 
 // FileFingerprint stores a cheap file-change signature for fast skip checks.
@@ -189,15 +192,26 @@ func upsertPreparedItem(ctx context.Context, tx *sql.Tx, entry PreparedItem) err
 	if err := upsertItem(ctx, tx, entry.Item); err != nil {
 		return err
 	}
-	oldChunks, err := loadChunks(ctx, tx, entry.Item.Source, entry.Item.ID)
-	if err != nil {
-		return err
-	}
-	if err = applyChunkDiff(ctx, tx, entry.Item, oldChunks, entry.Chunks); err != nil {
-		return err
+	// Fast-path for first-time-indexed items: no existing chunks to diff
+	// against, so skip the loadChunks SELECT and insert directly. This
+	// eliminates one query per file on initial indexing (huge speed-up).
+	if entry.IsNew {
+		for _, chunk := range entry.Chunks {
+			if err := insertChunk(ctx, tx, entry.Item, chunk); err != nil {
+				return err
+			}
+		}
+	} else {
+		oldChunks, err := loadChunks(ctx, tx, entry.Item.Source, entry.Item.ID)
+		if err != nil {
+			return err
+		}
+		if err = applyChunkDiff(ctx, tx, entry.Item, oldChunks, entry.Chunks); err != nil {
+			return err
+		}
 	}
 	if entry.Fingerprint != nil {
-		if err = upsertFileFingerprint(ctx, tx, *entry.Fingerprint); err != nil {
+		if err := upsertFileFingerprint(ctx, tx, *entry.Fingerprint); err != nil {
 			return err
 		}
 	}
@@ -798,7 +812,10 @@ func deleteFTS(ctx context.Context, tx *sql.Tx, old model.Chunk) error {
 
 // insertCJK stores generated CJK bigrams for substring search.
 func insertCJK(ctx context.Context, tx *sql.Tx, rowID int64, chunk model.Chunk) error {
-	grams := cjkGrams(cjkIndexText(chunk))
+	grams := chunk.CJKGrams
+	if grams == "" {
+		grams = cjkGrams(cjkIndexText(chunk))
+	}
 	if grams == "" {
 		return nil
 	}
@@ -828,6 +845,14 @@ func cjkIndexText(chunk model.Chunk) string {
 		return chunk.Title + " " + chunk.Content
 	}
 	return chunk.Title + " " + chunk.Preview
+}
+
+// PrecomputeCJKGrams returns the CJK bigram string that would be persisted
+// for a chunk. Callers (e.g. workers preparing items off the writer thread)
+// can store the result in Chunk.CJKGrams to skip the CPU work inside the
+// writer's transaction.
+func PrecomputeCJKGrams(chunk model.Chunk) string {
+	return cjkGrams(cjkIndexText(chunk))
 }
 
 // insertChunkRow inserts chunk metadata and returns the SQLite rowid.

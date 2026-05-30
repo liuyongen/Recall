@@ -455,8 +455,13 @@ func (e *Engine) syncFileAdapter(
 		ok    bool
 	}
 
+	type workItem struct {
+		candidate adapters.FileCandidate
+		known     bool
+	}
+
 	// Wider buffers smooth producer/consumer bursts when scanning huge volumes.
-	paths := make(chan adapters.FileCandidate, 1024)
+	paths := make(chan workItem, 1024)
 	prepared := make(chan preparedResult, 1024)
 	errCh := make(chan error, 1)
 	var fastSkipped atomic.Int64
@@ -477,20 +482,30 @@ func (e *Engine) syncFileAdapter(
 					return true
 				}
 			}
-			for candidate := range paths {
+			for item := range paths {
 				if workCtx.Err() != nil {
 					return
 				}
-				entry, item, ok := e.prepareFileCandidate(workCtx, adapter, candidate)
+				entry, dataItem, ok := e.prepareFileCandidate(workCtx, adapter, item.candidate)
 				if !ok {
 					if !send(preparedResult{}) {
 						return
 					}
 					continue
 				}
+				if !item.known {
+					entry.IsNew = true
+				}
+				// Pre-compute CJK bigrams off the writer thread for any
+				// chunks already materialised by the worker.
+				for i := range entry.Chunks {
+					if entry.Chunks[i].CJKGrams == "" {
+						entry.Chunks[i].CJKGrams = storage.PrecomputeCJKGrams(entry.Chunks[i])
+					}
+				}
 				if !send(preparedResult{
 					entry: entry,
-					item:  item,
+					item:  dataItem,
 					ok:    true,
 				}) {
 					return
@@ -542,7 +557,13 @@ func (e *Engine) syncFileAdapter(
 			activeWorkers.Add(1)
 			spawnWorker()
 		}
-		e.startProgress(strings.Join(adapter.Roots, ", "), int(activeWorkers.Load()))
+		// Only update the worker count; do NOT call startProgress which would
+		// reset all counters and revert the phase back to "starting".
+		e.progressMu.Lock()
+		if e.progress.Active {
+			e.progress.Workers = int(activeWorkers.Load())
+		}
+		e.progressMu.Unlock()
 	}()
 
 	go func() {
@@ -561,10 +582,11 @@ func (e *Engine) syncFileAdapter(
 			return false, true
 		}, func(candidate adapters.FileCandidate) error {
 			e.addProgressCandidate(candidate.Path)
+			_, known := fingerprints[fingerprintPath(candidate.Path)]
 			select {
 			case <-workCtx.Done():
 				return workCtx.Err()
-			case paths <- candidate:
+			case paths <- workItem{candidate: candidate, known: known}:
 				return nil
 			}
 		})
@@ -645,6 +667,28 @@ func (e *Engine) prepareFileCandidate(
 
 	if extract.SupportsPlainText(candidate.Path) {
 		item := streamingFileItem(candidate, adapter.MaxBytes)
+		// For small/medium plain-text files do all the heavy work (file read,
+		// UTF-8 normalisation, chunking, hashing) right here in the worker so
+		// the writer's critical section only runs SQL. This converts the
+		// indexing pipeline from effectively single-threaded (everything
+		// behind the writer mutex) into N workers actually doing work in
+		// parallel. Large files fall through to the streaming path so we
+		// don't buffer hundreds of MB per worker.
+		if candidate.Size > 0 && candidate.Size <= eagerPlainTextThreshold {
+			if chunks, ok := e.eagerChunkPlainText(ctx, item); ok {
+				if len(chunks) == 0 {
+					chunks = pathOnlyChunks(item)
+				}
+				if len(chunks) == 0 {
+					return storage.PreparedItem{}, model.DataItem{}, false
+				}
+				return storage.PreparedItem{
+					Item:        item,
+					Chunks:      chunks,
+					Fingerprint: fileFingerprint(candidate, chunks),
+				}, item, true
+			}
+		}
 		entry := storage.PreparedItem{
 			Item:        item,
 			ChunkSource: e.fileChunkSource(item),
@@ -698,6 +742,37 @@ func (e *Engine) prepareFileCandidate(
 		Chunks:      chunks,
 		Fingerprint: fileFingerprint(candidate, chunks),
 	}, item, true
+}
+
+// eagerPlainTextThreshold caps the size of files whose chunks are produced in
+// the worker (rather than streamed inside the writer's transaction). 2 MB
+// covers the vast majority of source/text files while keeping per-worker peak
+// memory bounded (workers * threshold).
+const eagerPlainTextThreshold int64 = 2 * 1024 * 1024
+
+// eagerChunkPlainText reads a plain-text file fully in the calling worker and
+// returns the prepared chunks. Returns (nil, false) if the file cannot be read.
+func (e *Engine) eagerChunkPlainText(ctx context.Context, item model.DataItem) ([]model.Chunk, bool) {
+	if item.ContentSource == nil {
+		return nil, false
+	}
+	reader, err := item.ContentSource(ctx)
+	if err != nil || reader == nil {
+		return nil, false
+	}
+	defer reader.Close()
+	chunks := make([]model.Chunk, 0, 4)
+	err = e.indexer.StreamItemChunks(ctx, item, reader, func(c model.Chunk) error {
+		// Pre-compute CJK bigrams off the writer thread so the writer's
+		// critical section only runs SQL.
+		c.CJKGrams = storage.PrecomputeCJKGrams(c)
+		chunks = append(chunks, c)
+		return nil
+	})
+	if err != nil {
+		return nil, false
+	}
+	return chunks, true
 }
 
 func (e *Engine) fileChunkSource(item model.DataItem) storage.ChunkSource {
