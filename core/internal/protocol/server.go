@@ -22,6 +22,7 @@ type Server struct {
 	logger   *log.Logger
 	handlers map[string]Handler
 	writeMu  sync.Mutex
+	encoder  *json.Encoder
 }
 
 type request struct {
@@ -50,6 +51,7 @@ func NewServer(in io.Reader, out io.Writer, logger *log.Logger) *Server {
 		out:      out,
 		logger:   logger,
 		handlers: make(map[string]Handler),
+		encoder:  json.NewEncoder(out),
 	}
 }
 
@@ -126,8 +128,7 @@ func (s *Server) write(id string, result any, err error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	encoder := json.NewEncoder(s.out)
-	if encodeErr := encoder.Encode(msg); encodeErr != nil {
+	if encodeErr := s.encoder.Encode(msg); encodeErr != nil {
 		s.logger.Printf("encode response: %v", encodeErr)
 	}
 }

@@ -48,6 +48,12 @@ type Engine struct {
 	searchRunID     uint64
 	progressMu      sync.RWMutex
 	progress        model.IndexProgress
+	// lock-free counters updated during scanning; read back in IndexProgress.
+	progressTotal   atomic.Int64
+	progressScanned atomic.Int64
+	progressIndexed atomic.Int64
+	progressSkipped atomic.Int64
+	progressWritten atomic.Int64
 	// file watching
 	watcher *fsnotify.Watcher
 	watchMu sync.RWMutex
@@ -109,6 +115,7 @@ func New(ctx context.Context, cfg Config) (*Engine, error) {
 		}
 	}
 	go engine.watcherLoop()
+	go engine.periodicOptimize()
 
 	return engine, nil
 }
@@ -306,10 +313,31 @@ func (e *Engine) Optimize(ctx context.Context) (map[string]any, error) {
 }
 
 // IndexProgress returns the latest live indexing status snapshot.
+// Counts are read from lock-free atomic counters; ETA is computed inline.
 func (e *Engine) IndexProgress(ctx context.Context) (model.IndexProgress, error) {
 	e.progressMu.RLock()
-	defer e.progressMu.RUnlock()
-	return e.progress, nil
+	p := e.progress
+	e.progressMu.RUnlock()
+	if p.Active {
+		p.Total = int(e.progressTotal.Load())
+		p.Scanned = int(e.progressScanned.Load())
+		p.Indexed = int(e.progressIndexed.Load())
+		p.Skipped = int(e.progressSkipped.Load())
+		p.Written = int(e.progressWritten.Load())
+		now := time.Now().UnixMilli()
+		if p.StartedAt > 0 {
+			elapsed := float64(now - p.StartedAt)
+			p.ElapsedMS = elapsed
+			if elapsed > 0 {
+				p.FilesPerSec = float64(p.Scanned) / (elapsed / 1000)
+				remaining := p.Total - p.Scanned
+				if remaining > 0 && p.FilesPerSec > 0 {
+					p.EtaMS = float64(remaining) / p.FilesPerSec * 1000
+				}
+			}
+		}
+	}
+	return p, nil
 }
 
 // syncAdapter pulls incremental data from one adapter and indexes it.
@@ -806,6 +834,11 @@ func fingerprintPath(path string) string {
 
 func (e *Engine) startProgress(path string, workers int) {
 	now := time.Now()
+	e.progressTotal.Store(0)
+	e.progressScanned.Store(0)
+	e.progressIndexed.Store(0)
+	e.progressSkipped.Store(0)
+	e.progressWritten.Store(0)
 	e.progressMu.Lock()
 	defer e.progressMu.Unlock()
 	e.progress = model.IndexProgress{
@@ -825,40 +858,26 @@ func (e *Engine) setProgressPhase(phase string) {
 		return
 	}
 	e.progress.Phase = phase
-	e.refreshProgressLocked(time.Now())
+	e.progress.UpdatedAt = time.Now().UnixMilli()
 }
 
 func (e *Engine) addProgressCandidate(path string) {
+	e.progressTotal.Add(1)
 	e.progressMu.Lock()
-	defer e.progressMu.Unlock()
-	if !e.progress.Active {
-		return
+	if e.progress.Active {
+		e.progress.Current = path
 	}
-	e.progress.Current = path
-	e.progress.Total++
-	e.refreshProgressLocked(time.Now())
+	e.progressMu.Unlock()
 }
 
 func (e *Engine) addProgressCounts(scanned, indexed, skipped int) {
-	e.progressMu.Lock()
-	defer e.progressMu.Unlock()
-	if !e.progress.Active {
-		return
-	}
-	e.progress.Scanned += scanned
-	e.progress.Indexed += indexed
-	e.progress.Skipped += skipped
-	e.refreshProgressLocked(time.Now())
+	e.progressScanned.Add(int64(scanned))
+	e.progressIndexed.Add(int64(indexed))
+	e.progressSkipped.Add(int64(skipped))
 }
 
 func (e *Engine) addProgressWritten(written int) {
-	e.progressMu.Lock()
-	defer e.progressMu.Unlock()
-	if !e.progress.Active {
-		return
-	}
-	e.progress.Written += written
-	e.refreshProgressLocked(time.Now())
+	e.progressWritten.Add(int64(written))
 }
 
 func (e *Engine) finishProgress(summary model.SyncSummary, err error) {
@@ -898,19 +917,17 @@ func (e *Engine) markProgressCanceled() {
 	e.progress.LastError = context.Canceled.Error()
 }
 
-func (e *Engine) refreshProgressLocked(now time.Time) {
-	e.progress.UpdatedAt = now.UnixMilli()
-	if e.progress.StartedAt > 0 {
-		elapsed := float64(now.UnixMilli() - e.progress.StartedAt)
-		e.progress.ElapsedMS = elapsed
-		if elapsed > 0 {
-			e.progress.FilesPerSec = float64(e.progress.Scanned) / (elapsed / 1000)
-			remaining := e.progress.Total - e.progress.Scanned
-			if remaining > 0 && e.progress.FilesPerSec > 0 {
-				e.progress.EtaMS = float64(remaining) / e.progress.FilesPerSec * 1000
-			} else {
-				e.progress.EtaMS = 0
-			}
+// periodicOptimize merges FTS5 segments and updates query planner statistics
+// every 30 minutes to prevent search from slowing down as the index grows.
+func (e *Engine) periodicOptimize() {
+	ticker := time.NewTicker(30 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-e.ctx.Done():
+			return
+		case <-ticker.C:
+			_ = e.store.Optimize(e.ctx)
 		}
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -30,8 +31,10 @@ type Config struct {
 }
 
 // Store wraps SQLite access for metadata, chunks, and FTS5.
+// db is the read-only connection pool; writeDB is the single write connection.
 type Store struct {
 	db      *sql.DB
+	writeDB *sql.DB
 	writeMu sync.Mutex
 }
 
@@ -60,6 +63,8 @@ type FileFingerprint struct {
 }
 
 // Open creates the SQLite database and applies production pragmas.
+// Two separate connection pools are used: a read pool for concurrent searches
+// and a single write connection so indexing never blocks search.
 func Open(ctx context.Context, cfg Config) (*Store, error) {
 	if cfg.Path == "" {
 		return nil, fmt.Errorf("database path is required")
@@ -67,32 +72,57 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(cfg.Path), 0o755); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", cfg.Path)
+
+	// Read pool: as many connections as CPU cores so searches run in parallel.
+	readDB, err := sql.Open("sqlite", cfg.Path)
 	if err != nil {
 		return nil, err
 	}
+	readers := runtime.NumCPU()
+	if readers < 2 {
+		readers = 2
+	}
+	readDB.SetMaxOpenConns(readers)
+	readDB.SetMaxIdleConns(readers)
+	readDB.SetConnMaxLifetime(0)
 
-	// WAL mode allows concurrent reads with one writer.
-	// Use a small pool for read concurrency while writes are serialized by writeMu.
-	db.SetMaxOpenConns(4)
-	db.SetMaxIdleConns(4)
-	db.SetConnMaxLifetime(0)
+	// Write pool: single connection. SQLite only allows one writer at a time
+	// and writeMu already serializes our writes, so one connection is optimal.
+	writeDB, err := sql.Open("sqlite", cfg.Path)
+	if err != nil {
+		_ = readDB.Close()
+		return nil, err
+	}
+	writeDB.SetMaxOpenConns(1)
+	writeDB.SetMaxIdleConns(1)
+	writeDB.SetConnMaxLifetime(0)
 
-	store := &Store{db: db}
-	if err := store.configure(ctx); err != nil {
-		_ = db.Close()
+	store := &Store{db: readDB, writeDB: writeDB}
+	if err := store.configure(ctx, readDB); err != nil {
+		_ = readDB.Close()
+		_ = writeDB.Close()
+		return nil, err
+	}
+	if err := store.configure(ctx, writeDB); err != nil {
+		_ = readDB.Close()
+		_ = writeDB.Close()
 		return nil, err
 	}
 	if err := store.migrate(ctx); err != nil {
-		_ = db.Close()
+		_ = readDB.Close()
+		_ = writeDB.Close()
 		return nil, err
 	}
 	return store, nil
 }
 
-// Close releases the SQLite connection pool.
+// Close releases both SQLite connection pools.
 func (s *Store) Close() error {
-	return s.db.Close()
+	err := s.writeDB.Close()
+	if err2 := s.db.Close(); err == nil {
+		err = err2
+	}
+	return err
 }
 
 // SQLiteVersion returns the linked SQLite engine version.
@@ -104,7 +134,16 @@ func (s *Store) SQLiteVersion(ctx context.Context) (string, error) {
 
 // Optimize asks SQLite to update query planner and FTS statistics.
 func (s *Store) Optimize(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, "PRAGMA optimize")
+	_, err := s.writeDB.ExecContext(ctx, "PRAGMA optimize")
+	if err != nil {
+		return err
+	}
+	// Also merge FTS5 segment files to reduce query fragmentation.
+	_, err = s.writeDB.ExecContext(ctx, "INSERT INTO chunk_fts(chunk_fts) VALUES('optimize')")
+	if err != nil {
+		return err
+	}
+	_, err = s.writeDB.ExecContext(ctx, "INSERT INTO "+cjkLayeredFTSTable+"("+cjkLayeredFTSTable+") VALUES('optimize')")
 	return err
 }
 
@@ -123,7 +162,7 @@ func (s *Store) UpsertItems(ctx context.Context, entries []PreparedItem) error {
 	defer s.writeMu.Unlock()
 
 	return retryBusy(ctx, func() (err error) {
-		tx, err := s.db.BeginTx(ctx, nil)
+		tx, err := s.writeDB.BeginTx(ctx, nil)
 		if err != nil {
 			return err
 		}
@@ -181,9 +220,6 @@ func (s *Store) Search(ctx context.Context, req model.SearchRequest, ftsQuery st
 			}
 			ranked := rerankSearchResults(results, req.Query, 0)
 			page, hasMore := paginateResults(ranked, offset, limit)
-			if err := s.loadSearchMetadata(ctx, page); err != nil {
-				return nil, false, err
-			}
 			return page, hasMore, nil
 		}
 	}
@@ -197,9 +233,6 @@ func (s *Store) Search(ctx context.Context, req model.SearchRequest, ftsQuery st
 	}
 	ranked := rerankSearchResults(results, req.Query, 0)
 	page, hasMore := paginateResults(ranked, offset, limit)
-	if err := s.loadSearchMetadata(ctx, page); err != nil {
-		return nil, false, err
-	}
 	return page, hasMore, nil
 }
 
@@ -215,7 +248,7 @@ func (s *Store) searchTable(
 	where, args := buildSearchWhere(req, matchQuery, table)
 	sqlText := fmt.Sprintf(`
 SELECT c.rowid, c.item_id, c.source, c.title, c.preview, c.path,
-       c.file_type, c.updated_at, %s AS score
+       c.file_type, c.updated_at, c.metadata_json, %s AS score
 FROM %s
 JOIN chunks c ON c.rowid = %s.rowid
 WHERE %s
@@ -244,44 +277,6 @@ ORDER BY score ASC, c.updated_at DESC`, scoreExpr, table, table, strings.Join(wh
 	return results, rows.Err()
 }
 
-func (s *Store) loadSearchMetadata(ctx context.Context, results []model.SearchResult) error {
-	if len(results) == 0 {
-		return nil
-	}
-	placeholders := make([]string, len(results))
-	args := make([]any, len(results))
-	for i, result := range results {
-		placeholders[i] = "?"
-		args[i] = result.RowID
-	}
-
-	rows, err := s.db.QueryContext(ctx,
-		"SELECT rowid, metadata_json FROM chunks WHERE rowid IN ("+strings.Join(placeholders, ",")+")",
-		args...,
-	)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	metadataByRowID := make(map[int64]map[string]any, len(results))
-	for rows.Next() {
-		var rowID int64
-		var metadataJSON string
-		if err := rows.Scan(&rowID, &metadataJSON); err != nil {
-			return err
-		}
-		metadataByRowID[rowID] = decodeMetadata(metadataJSON)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for i := range results {
-		results[i].Metadata = metadataByRowID[results[i].RowID]
-	}
-	return nil
-}
-
 // GetWatchedPaths returns all paths that should be actively watched.
 func (s *Store) GetWatchedPaths(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT path FROM watched_paths ORDER BY added_at")
@@ -305,7 +300,7 @@ func (s *Store) AddWatchedPath(ctx context.Context, path string) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	return retryBusy(ctx, func() error {
-		_, err := s.db.ExecContext(ctx,
+		_, err := s.writeDB.ExecContext(ctx,
 			`INSERT INTO watched_paths(path, added_at) VALUES(?, ?) ON CONFLICT(path) DO NOTHING`,
 			path, time.Now().Unix(),
 		)
@@ -318,7 +313,7 @@ func (s *Store) RemoveWatchedPath(ctx context.Context, path string) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	return retryBusy(ctx, func() error {
-		_, err := s.db.ExecContext(ctx, "DELETE FROM watched_paths WHERE path = ?", path)
+		_, err := s.writeDB.ExecContext(ctx, "DELETE FROM watched_paths WHERE path = ?", path)
 		return err
 	})
 }
@@ -344,7 +339,7 @@ func (s *Store) SetSyncTime(ctx context.Context, adapterID string, lastSync int6
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	return retryBusy(ctx, func() error {
-		_, err := s.db.ExecContext(ctx, `
+		_, err := s.writeDB.ExecContext(ctx, `
 INSERT INTO sync_state(adapter_id, last_sync_time, updated_at)
 VALUES(?, ?, ?)
 ON CONFLICT(adapter_id) DO UPDATE SET
@@ -359,44 +354,47 @@ ON CONFLICT(adapter_id) DO UPDATE SET
 }
 
 // LoadFileFingerprints returns known file signatures under the provided roots.
+// All roots are queried in a single SQL statement to avoid per-root round-trips.
 func (s *Store) LoadFileFingerprints(ctx context.Context, roots []string) (map[string]FileFingerprint, error) {
-	fingerprints := make(map[string]FileFingerprint)
+	if len(roots) == 0 {
+		return map[string]FileFingerprint{}, nil
+	}
+
+	// Build a single query: exact match OR LIKE for each root.
+	clauses := make([]string, 0, len(roots)*2)
+	args := make([]any, 0, len(roots)*2)
 	for _, root := range roots {
+		normalizedRoot := normalizeFingerprintPath(root)
+		likeRoot := strings.TrimRight(filepath.ToSlash(normalizedRoot), "/") + "/%"
+		clauses = append(clauses, "path = ?", "path LIKE ?")
+		args = append(args, normalizedRoot, likeRoot)
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT path, size, mod_time_ns, content_hash FROM file_fingerprints WHERE "+strings.Join(clauses, " OR "),
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	fingerprints := make(map[string]FileFingerprint)
+	for rows.Next() {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		normalizedRoot := normalizeFingerprintPath(root)
-		likeRoot := strings.TrimRight(filepath.ToSlash(normalizedRoot), "/") + "/%"
-		rows, err := s.db.QueryContext(ctx, `
-SELECT path, size, mod_time_ns, content_hash
-FROM file_fingerprints
-WHERE path = ? OR path LIKE ?`, normalizedRoot, likeRoot)
-		if err != nil {
+		var fp FileFingerprint
+		if err := rows.Scan(&fp.Path, &fp.Size, &fp.ModTimeNS, &fp.ContentHash); err != nil {
 			return nil, err
 		}
-		for rows.Next() {
-			var fp FileFingerprint
-			if err := rows.Scan(&fp.Path, &fp.Size, &fp.ModTimeNS, &fp.ContentHash); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			fingerprints[fp.Path] = fp
-			if err := ctx.Err(); err != nil {
-				rows.Close()
-				return nil, err
-			}
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		rows.Close()
+		fingerprints[fp.Path] = fp
 	}
-	return fingerprints, nil
+	return fingerprints, rows.Err()
 }
 
-// configure applies SQLite pragmas required by the search engine.
-func (s *Store) configure(ctx context.Context) error {
+// configure applies SQLite pragmas to the given connection pool.
+func (s *Store) configure(ctx context.Context, db *sql.DB) error {
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA synchronous=NORMAL",
@@ -408,7 +406,7 @@ func (s *Store) configure(ctx context.Context) error {
 		"PRAGMA optimize",
 	}
 	for _, pragma := range pragmas {
-		if _, err := s.db.ExecContext(ctx, pragma); err != nil {
+		if _, err := db.ExecContext(ctx, pragma); err != nil {
 			return fmt.Errorf("%s: %w", pragma, err)
 		}
 	}
@@ -484,7 +482,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 
 	for _, statement := range statements {
-		if _, err = s.db.ExecContext(ctx, statement); err != nil {
+		if _, err = s.writeDB.ExecContext(ctx, statement); err != nil {
 			return err
 		}
 	}
@@ -497,7 +495,7 @@ func (s *Store) migrate(ctx context.Context) error {
 
 func (s *Store) hasTable(ctx context.Context, table string) (bool, error) {
 	var exists int
-	err := s.db.QueryRowContext(ctx, `
+	err := s.writeDB.QueryRowContext(ctx, `
 SELECT 1
 FROM sqlite_master
 WHERE type IN ('table','view') AND name = ?
@@ -513,7 +511,7 @@ LIMIT 1`, table).Scan(&exists)
 
 // rebuildLayeredCJKIndex rebuilds the only supported CJK index shape.
 func (s *Store) rebuildLayeredCJKIndex(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.writeDB.QueryContext(ctx, `
 SELECT rowid, chunk_id, item_id, source, title, content, preview, ordinal, hash,
        path, file_type, metadata_json, created_at, updated_at
 FROM chunks`)
@@ -536,10 +534,10 @@ FROM chunks`)
 	}
 	rows.Close()
 
-	if _, err := s.db.ExecContext(ctx, "DROP TABLE IF EXISTS "+cjkLayeredFTSTable); err != nil {
+	if _, err := s.writeDB.ExecContext(ctx, "DROP TABLE IF EXISTS "+cjkLayeredFTSTable); err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx, `CREATE VIRTUAL TABLE `+cjkLayeredFTSTable+` USING fts5(
+	if _, err := s.writeDB.ExecContext(ctx, `CREATE VIRTUAL TABLE `+cjkLayeredFTSTable+` USING fts5(
 		grams,
 		content='',
 		tokenize='unicode61 remove_diacritics 2'
@@ -550,7 +548,7 @@ FROM chunks`)
 		return nil
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.writeDB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -924,8 +922,8 @@ func searchCandidateLimit(window int) int {
 	if window <= 0 {
 		window = 50
 	}
-	candidateLimit := max(window*8, 160)
-	return min(candidateLimit, 20000)
+	candidateLimit := max(window*4, 80)
+	return min(candidateLimit, 5000)
 }
 
 func paginateResults(results []model.SearchResult, offset int, limit int) ([]model.SearchResult, bool) {
@@ -999,9 +997,12 @@ func rankAdjustment(result model.SearchResult, profile searchRankProfile, now in
 	}
 	stem := strings.TrimSuffix(name, normalizeRankText(filepath.Ext(name)))
 	preview := normalizeRankText(result.Preview)
+	// Pre-compute these once instead of recalculating inside each sub-function.
+	nameWords := normalizeNameWords(name)
+	pathBase := normalizeNameWords(normalizeRankText(filepath.Base(path)))
 
-	adjustment += exactQueryAdjustment(profile, title, name, stem, path, preview)
-	adjustment += tokenAdjustment(profile.tokens, title, name, stem, path, preview)
+	adjustment += exactQueryAdjustment(profile, title, name, nameWords, stem, pathBase, path, preview)
+	adjustment += tokenAdjustment(profile.tokens, title, name, nameWords, stem, pathBase, path, preview)
 	adjustment += sourceAdjustment(result, profile, path)
 	adjustment += noiseAdjustment(result, path, name)
 	adjustment += freshnessAdjustment(result.UpdatedAt, now)
@@ -1083,14 +1084,12 @@ func isBrowserSource(source string) bool {
 }
 
 // exactQueryAdjustment rewards direct title, filename, path, and preview hits.
-func exactQueryAdjustment(profile searchRankProfile, title string, name string, stem string, path string, preview string) float64 {
+func exactQueryAdjustment(profile searchRankProfile, title, name, nameWords, stem, pathBase, path, preview string) float64 {
 	if profile.query == "" {
 		return 0
 	}
 
 	var adjustment float64
-	nameWords := normalizeNameWords(name)
-	pathBase := normalizeNameWords(normalizeRankText(filepath.Base(path)))
 	switch {
 	case title == profile.query || name == profile.query || stem == profile.query || nameWords == profile.query || pathBase == profile.query:
 		adjustment -= 36
@@ -1122,10 +1121,8 @@ func exactQueryAdjustment(profile searchRankProfile, title string, name string, 
 }
 
 // tokenAdjustment rewards partial query terms in high-signal fields.
-func tokenAdjustment(tokens []string, title string, name string, stem string, path string, preview string) float64 {
+func tokenAdjustment(tokens []string, title, name, nameWords, stem, pathBase, path, preview string) float64 {
 	var adjustment float64
-	nameWords := normalizeNameWords(name)
-	pathBase := normalizeNameWords(normalizeRankText(filepath.Base(path)))
 	for _, token := range tokens {
 		if token == "" {
 			continue
@@ -1412,17 +1409,20 @@ func scanChunk(rows interface {
 	return chunk, nil
 }
 
-// scanSearchCandidate converts a lightweight candidate row into a SearchResult.
+// scanSearchCandidate converts one search row into a SearchResult.
+// metadata_json is decoded inline to avoid a second query.
 func scanSearchCandidate(rows *sql.Rows) (model.SearchResult, error) {
 	var result model.SearchResult
+	var metadataJSON string
 	err := rows.Scan(
 		&result.RowID, &result.ItemID, &result.Source, &result.Title,
 		&result.Preview, &result.Path, &result.FileType, &result.UpdatedAt,
-		&result.Score,
+		&metadataJSON, &result.Score,
 	)
 	if err != nil {
 		return result, err
 	}
+	result.Metadata = decodeMetadata(metadataJSON)
 	return result, nil
 }
 
