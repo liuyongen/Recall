@@ -46,6 +46,13 @@ type Status = {
   text: string;
 };
 
+type IndexSummary = {
+  indexed?: number;
+  scanned?: number;
+  skipped?: number;
+  canceled?: boolean;
+};
+
 type IndexProgress = {
   active: boolean;
   kind?: 'fast' | 'content';
@@ -372,18 +379,17 @@ export function App() {
     });
     setStatus({ kind: 'working', text: '正在索引' });
     try {
-      const res = await api.indexPath({ path: folder }) as { indexed?: number; canceled?: boolean };
+      const res = await api.indexPath({ path: folder }) as IndexSummary;
       if (res?.canceled) {
         setIndexProgress(null);
         setStatusAuto({ kind: 'idle', text: '索引已取消' });
         return;
       }
-      const count = res?.indexed ?? 0;
       const finalProgress = await api.indexProgress().catch(() => null) as IndexProgress | null;
       if (finalProgress) {
         setIndexProgress(finalProgress);
       }
-      setStatusAuto({ kind: 'idle', text: `索引完成，共 ${count} 个文件` });
+      setStatusAuto({ kind: 'idle', text: formatIndexCompletion(res, finalProgress) });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (isIndexCanceledError(message)) {
@@ -766,6 +772,20 @@ function formatTime(unixSeconds: number) {
     hour: '2-digit',
     minute: '2-digit'
   }).format(new Date(unixSeconds * 1000));
+}
+
+function formatIndexCompletion(summary: IndexSummary | null | undefined, progress: IndexProgress | null) {
+  const updated = progress?.indexed ?? summary?.indexed ?? 0;
+  const scanned = progress?.scanned ?? summary?.scanned ?? 0;
+  const skipped = progress?.skipped ?? summary?.skipped ?? 0;
+  if (scanned > 0) {
+    if (updated === 0) {
+      return `索引完成，无文件更新（扫描 ${scanned} 个）`;
+    }
+    const skippedText = skipped > 0 ? `，跳过 ${skipped} 个` : '';
+    return `索引完成，更新 ${updated} 个（扫描 ${scanned} 个${skippedText}）`;
+  }
+  return `索引完成，更新 ${updated} 个文件`;
 }
 
 function formatIndexProgress(progress: IndexProgress) {
