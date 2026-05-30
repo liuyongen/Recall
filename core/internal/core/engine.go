@@ -434,16 +434,50 @@ func (e *Engine) syncFileAdapter(
 	const batchSize = 800
 	batch := make([]storage.PreparedItem, 0, batchSize)
 
+	// Writer pipeline: a dedicated goroutine drains finished batches and
+	// commits them to SQLite while the collector keeps building the next one.
+	// This removes the serial stall where workers used to idle while the main
+	// loop was blocked inside a SQL commit.
+	batches := make(chan []storage.PreparedItem, 2)
+	writerDone := make(chan struct{})
+	var writerErr atomic.Pointer[error]
+	writerCtx, writerCancel := context.WithCancel(ctx)
+	defer writerCancel()
+	go func() {
+		defer close(writerDone)
+		for b := range batches {
+			if writerCtx.Err() != nil {
+				continue
+			}
+			if err := e.store.UpsertItems(writerCtx, b); err != nil {
+				writerErr.Store(&err)
+				writerCancel()
+				// Continue draining so the producer never blocks on send.
+				continue
+			}
+			e.addProgressWritten(len(b))
+		}
+	}()
+
+	getWriterErr := func() error {
+		if p := writerErr.Load(); p != nil {
+			return *p
+		}
+		return nil
+	}
+
 	flushBatch := func() error {
 		if len(batch) == 0 {
-			return nil
+			return getWriterErr()
 		}
-		if err := e.store.UpsertItems(ctx, batch); err != nil {
-			return err
+		out := batch
+		batch = make([]storage.PreparedItem, 0, batchSize)
+		select {
+		case <-writerCtx.Done():
+			return getWriterErr()
+		case batches <- out:
+			return getWriterErr()
 		}
-		e.addProgressWritten(len(batch))
-		batch = batch[:0]
-		return nil
 	}
 
 	workCtx, cancel := context.WithCancel(ctx)
@@ -614,6 +648,9 @@ func (e *Engine) syncFileAdapter(
 			e.setProgressPhase("writing")
 			if err := flushBatch(); err != nil {
 				cancel()
+				writerCancel()
+				close(batches)
+				<-writerDone
 				e.finishProgress(summary, err)
 				return summary, err
 			}
@@ -621,6 +658,9 @@ func (e *Engine) syncFileAdapter(
 		}
 	}
 	if err := <-errCh; err != nil {
+		writerCancel()
+		close(batches)
+		<-writerDone
 		e.finishProgress(summary, err)
 		return summary, err
 	}
@@ -629,6 +669,14 @@ func (e *Engine) syncFileAdapter(
 	summary.Skipped += skippedUnchanged
 	e.setProgressPhase("writing")
 	if err := flushBatch(); err != nil {
+		close(batches)
+		<-writerDone
+		e.finishProgress(summary, err)
+		return summary, err
+	}
+	close(batches)
+	<-writerDone
+	if err := getWriterErr(); err != nil {
 		e.finishProgress(summary, err)
 		return summary, err
 	}

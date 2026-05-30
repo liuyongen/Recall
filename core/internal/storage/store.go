@@ -2,9 +2,7 @@ package storage
 
 import (
 	"context"
-	"crypto/sha1"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,10 +30,14 @@ type Config struct {
 
 // Store wraps SQLite access for metadata, chunks, and FTS5.
 // db is the read-only connection pool; writeDB is the single write connection.
+// chunks/FTS data is sharded into multiple sibling SQLite files (see shard.go)
+// so multiple workers can write in true parallel — one SQLite file = one
+// writer at a time, but N shards = N concurrent writers.
 type Store struct {
 	db      *sql.DB
 	writeDB *sql.DB
 	writeMu sync.Mutex
+	shards  []*chunkShard
 }
 
 // ChunkSource streams prepared chunks to the store. It must be repeatable so a
@@ -116,16 +118,31 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 		_ = writeDB.Close()
 		return nil, err
 	}
+	shards, err := openShards(ctx, cfg.Path)
+	if err != nil {
+		_ = readDB.Close()
+		_ = writeDB.Close()
+		return nil, err
+	}
+	store.shards = shards
 	return store, nil
 }
 
-// Close releases both SQLite connection pools.
+// Close releases the main connection pools and all shard pools.
 func (s *Store) Close() error {
-	err := s.writeDB.Close()
-	if err2 := s.db.Close(); err == nil {
-		err = err2
+	var firstErr error
+	for _, sh := range s.shards {
+		if err := sh.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	return err
+	if err := s.writeDB.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if err := s.db.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
 }
 
 // SQLiteVersion returns the linked SQLite engine version.
@@ -135,18 +152,17 @@ func (s *Store) SQLiteVersion(ctx context.Context) (string, error) {
 	return version, err
 }
 
-// Optimize asks SQLite to update query planner and FTS statistics.
+// Optimize asks SQLite to update query planner and FTS statistics across the
+// main DB and every shard. Shards run in parallel.
 func (s *Store) Optimize(ctx context.Context) error {
+	if err := runShardsParallel(s.shards, func(sh *chunkShard) error {
+		return sh.optimize(ctx)
+	}); err != nil {
+		return err
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	_, err := s.writeDB.ExecContext(ctx, "PRAGMA optimize")
-	if err != nil {
-		return err
-	}
-	// Also merge FTS5 segment files to reduce query fragmentation.
-	_, err = s.writeDB.ExecContext(ctx, "INSERT INTO chunk_fts(chunk_fts) VALUES('optimize')")
-	if err != nil {
-		return err
-	}
-	_, err = s.writeDB.ExecContext(ctx, "INSERT INTO "+cjkLayeredFTSTable+"("+cjkLayeredFTSTable+") VALUES('optimize')")
 	return err
 }
 
@@ -155,15 +171,59 @@ func (s *Store) UpsertItem(ctx context.Context, item model.DataItem, chunks []mo
 	return s.UpsertItems(ctx, []PreparedItem{{Item: item, Chunks: chunks}})
 }
 
-// UpsertItems incrementally applies a batch of changed items in one write transaction.
+// UpsertItems applies a batch of items by fan-out: each shard writes its
+// assigned chunks in true parallel, then the main DB receives all item rows
+// and fingerprints in a single transaction.
+//
+// Failure ordering: shards are committed first; if any shard fails, the main
+// DB is left untouched so the next sync re-extracts the affected items. A
+// successful per-item retry will pre-delete any orphan chunks via the IsNew
+// path inside the shard.
 func (s *Store) UpsertItems(ctx context.Context, entries []PreparedItem) error {
 	if len(entries) == 0 {
 		return nil
 	}
 
+	// 1. Group entries by their assigned shard.
+	groups := make([][]PreparedItem, len(s.shards))
+	for _, entry := range entries {
+		idx := pickShard(entry.Item.Source, entry.Item.ID)
+		groups[idx] = append(groups[idx], entry)
+	}
+
+	// 2. Run shard writes in parallel and collect hash updates from
+	//    streaming-source entries (those finalise their fingerprint hash
+	//    only once all chunks have been emitted).
+	var (
+		hashMu  sync.Mutex
+		hashUpd = make(map[string]string, len(entries))
+	)
+	keyFor := func(source, id string) string { return source + "\x00" + id }
+
+	if err := runShardsParallel(s.shards, func(sh *chunkShard) error {
+		group := groups[sh.idx]
+		if len(group) == 0 {
+			return nil
+		}
+		updates, err := sh.writeEntries(ctx, group)
+		if err != nil {
+			return err
+		}
+		if len(updates) > 0 {
+			hashMu.Lock()
+			for _, u := range updates {
+				hashUpd[keyFor(u.Source, u.ItemID)] = u.Hash
+			}
+			hashMu.Unlock()
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	// 3. Write items + fingerprints to the main DB in one transaction.
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-
 	return retryBusy(ctx, func() (err error) {
 		tx, err := s.writeDB.BeginTx(ctx, nil)
 		if err != nil {
@@ -172,53 +232,26 @@ func (s *Store) UpsertItems(ctx context.Context, entries []PreparedItem) error {
 		defer rollbackUnlessDone(tx, &err)
 
 		for _, entry := range entries {
-			if entry.ChunkSource != nil {
-				if err = upsertItemFromChunkSource(ctx, tx, entry); err != nil {
-					return err
-				}
-				continue
-			}
-			if err = upsertPreparedItem(ctx, tx, entry); err != nil {
+			if err = upsertItem(ctx, tx, entry.Item); err != nil {
 				return err
 			}
+			if entry.Fingerprint != nil {
+				fp := *entry.Fingerprint
+				if h, ok := hashUpd[keyFor(entry.Item.Source, entry.Item.ID)]; ok {
+					fp.ContentHash = h
+				}
+				if err = upsertFileFingerprint(ctx, tx, fp); err != nil {
+					return err
+				}
+			}
 		}
-
-		err = tx.Commit()
-		return err
+		return tx.Commit()
 	})
 }
 
-func upsertPreparedItem(ctx context.Context, tx *sql.Tx, entry PreparedItem) error {
-	if err := upsertItem(ctx, tx, entry.Item); err != nil {
-		return err
-	}
-	// Fast-path for first-time-indexed items: no existing chunks to diff
-	// against, so skip the loadChunks SELECT and insert directly. This
-	// eliminates one query per file on initial indexing (huge speed-up).
-	if entry.IsNew {
-		for _, chunk := range entry.Chunks {
-			if err := insertChunk(ctx, tx, entry.Item, chunk); err != nil {
-				return err
-			}
-		}
-	} else {
-		oldChunks, err := loadChunks(ctx, tx, entry.Item.Source, entry.Item.ID)
-		if err != nil {
-			return err
-		}
-		if err = applyChunkDiff(ctx, tx, entry.Item, oldChunks, entry.Chunks); err != nil {
-			return err
-		}
-	}
-	if entry.Fingerprint != nil {
-		if err := upsertFileFingerprint(ctx, tx, *entry.Fingerprint); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// Search executes an FTS5 query and returns ranked chunk results.
+// Search executes an FTS5 query and returns ranked chunk results. Each shard
+// is queried in parallel and their over-sampled candidate sets are merged
+// before global reranking.
 func (s *Store) Search(ctx context.Context, req model.SearchRequest, ftsQuery string) ([]model.SearchResult, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
@@ -227,7 +260,7 @@ func (s *Store) Search(ctx context.Context, req model.SearchRequest, ftsQuery st
 	offset := normalizeSearchOffset(req.Offset)
 	window := offset + limit
 	if cjkQuery := buildCJKQuery(req.Query); cjkQuery != "" {
-		results, err := s.searchTable(ctx, req, cjkQuery, cjkLayeredFTSTable, "bm25("+cjkLayeredFTSTable+")", window)
+		results, err := s.searchAllShards(ctx, req, cjkQuery, cjkLayeredFTSTable, "bm25("+cjkLayeredFTSTable+")", window)
 		if err == nil && len(results) > 0 {
 			if err := ctx.Err(); err != nil {
 				return nil, false, err
@@ -238,7 +271,7 @@ func (s *Store) Search(ctx context.Context, req model.SearchRequest, ftsQuery st
 		}
 	}
 
-	results, err := s.searchTable(ctx, req, ftsQuery, "chunk_fts", "bm25(chunk_fts, 8.0, 1.0)", window)
+	results, err := s.searchAllShards(ctx, req, ftsQuery, "chunk_fts", "bm25(chunk_fts, 8.0, 1.0)", window)
 	if err != nil {
 		return nil, false, err
 	}
@@ -250,8 +283,9 @@ func (s *Store) Search(ctx context.Context, req model.SearchRequest, ftsQuery st
 	return page, hasMore, nil
 }
 
-// searchTable fetches an over-sampled candidate set from one FTS5 table.
-func (s *Store) searchTable(
+// searchAllShards fans out an FTS query to every shard and merges the
+// over-sampled candidate sets.
+func (s *Store) searchAllShards(
 	ctx context.Context,
 	req model.SearchRequest,
 	matchQuery string,
@@ -259,36 +293,34 @@ func (s *Store) searchTable(
 	scoreExpr string,
 	window int,
 ) ([]model.SearchResult, error) {
-	where, args := buildSearchWhere(req, matchQuery, table)
-	sqlText := fmt.Sprintf(`
-SELECT c.rowid, c.item_id, c.source, c.title, c.preview, c.path,
-       c.file_type, c.updated_at, c.metadata_json, %s AS score
-FROM %s
-JOIN chunks c ON c.rowid = %s.rowid
-WHERE %s
-ORDER BY score ASC, c.updated_at DESC`, scoreExpr, table, table, strings.Join(where, " AND "))
-	candidateCap := searchCandidateLimit(window)
-	sqlText += "\nLIMIT ?"
-	args = append(args, candidateCap)
-
-	rows, err := s.db.QueryContext(ctx, sqlText, args...)
-	if err != nil {
+	perShardLimit := searchCandidateLimit(window)
+	resultsCh := make(chan []model.SearchResult, len(s.shards))
+	errCh := make(chan error, len(s.shards))
+	var wg sync.WaitGroup
+	for _, sh := range s.shards {
+		wg.Add(1)
+		go func(sh *chunkShard) {
+			defer wg.Done()
+			res, err := sh.searchShard(ctx, req, matchQuery, table, scoreExpr, perShardLimit)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			resultsCh <- res
+		}(sh)
+	}
+	wg.Wait()
+	close(resultsCh)
+	close(errCh)
+	if err := <-errCh; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	results := make([]model.SearchResult, 0, candidateCap)
-	for rows.Next() {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		result, err := scanSearchCandidate(rows)
-		if err != nil {
-			return nil, err
-		}
-		results = append(results, result)
+	// Merge candidate sets.
+	merged := make([]model.SearchResult, 0, perShardLimit*len(s.shards))
+	for r := range resultsCh {
+		merged = append(merged, r...)
 	}
-	return results, rows.Err()
+	return merged, nil
 }
 
 // GetWatchedPaths returns all paths that should be actively watched.
@@ -434,21 +466,31 @@ func (s *Store) configure(ctx context.Context, db *sql.DB) error {
 // into SQLite's page cache. Call this once in a goroutine right after Open so
 // that the first real search hits warm pages instead of cold disk.
 func (s *Store) WarmCache(ctx context.Context) {
-	for _, table := range []string{"chunk_fts", cjkLayeredFTSTable} {
+	for _, sh := range s.shards {
 		if ctx.Err() != nil {
 			return
 		}
-		// A COUNT(*) against the shadow tables forces SQLite to load the
-		// FTS5 index structure pages without returning large result sets.
-		_, _ = s.db.ExecContext(ctx, "SELECT COUNT(*) FROM "+table)
+		sh.warmCache(ctx)
 	}
 }
 
-// migrate creates metadata, chunk, FTS, and sync-state tables.
+// migrate creates the main-DB tables: items, file fingerprints, sync state,
+// and watched paths. Chunks and FTS indexes live in shard DB files (see
+// shard.go). Legacy chunks/FTS tables left over in the main DB from earlier
+// versions are dropped so a clean rebuild populates the shards.
 func (s *Store) migrate(ctx context.Context) error {
-	hadCJKTable, err := s.hasTable(ctx, cjkLayeredFTSTable)
-	if err != nil {
-		return err
+	// Drop any legacy chunks/FTS tables from the main DB. They used to live
+	// here before sharding; now the main DB only stores items/fingerprints/
+	// state. A clean rebuild via re-indexing repopulates the shards.
+	legacyDrops := []string{
+		"DROP TABLE IF EXISTS chunk_fts",
+		"DROP TABLE IF EXISTS " + cjkLayeredFTSTable,
+		"DROP TABLE IF EXISTS chunks",
+	}
+	for _, stmt := range legacyDrops {
+		if _, err := s.writeDB.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
 	}
 
 	statements := []string{
@@ -463,31 +505,6 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at INTEGER NOT NULL,
 			updated_at INTEGER NOT NULL,
 			PRIMARY KEY(source, id)
-		)`,
-		`CREATE TABLE IF NOT EXISTS chunks (
-			rowid INTEGER PRIMARY KEY AUTOINCREMENT,
-			chunk_id TEXT NOT NULL UNIQUE,
-			item_id TEXT NOT NULL,
-			source TEXT NOT NULL,
-			title TEXT NOT NULL,
-			content TEXT NOT NULL,
-			preview TEXT NOT NULL,
-			ordinal INTEGER NOT NULL,
-			hash TEXT NOT NULL,
-			path TEXT NOT NULL DEFAULT '',
-			file_type TEXT NOT NULL DEFAULT '',
-			metadata_json TEXT NOT NULL,
-			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL,
-			UNIQUE(source, item_id, ordinal)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_chunks_source_time ON chunks(source, updated_at DESC)`,
-		`CREATE INDEX IF NOT EXISTS idx_chunks_file_type ON chunks(file_type)`,
-		`CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
-			title,
-			content,
-			content='',
-			tokenize='unicode61 remove_diacritics 2'
 		)`,
 		`CREATE TABLE IF NOT EXISTS sync_state (
 			adapter_id TEXT PRIMARY KEY,
@@ -505,94 +522,14 @@ func (s *Store) migrate(ctx context.Context) error {
 			content_hash TEXT NOT NULL,
 			updated_at INTEGER NOT NULL
 		)`,
-		`CREATE VIRTUAL TABLE IF NOT EXISTS ` + cjkLayeredFTSTable + ` USING fts5(
-			grams,
-			content='',
-			tokenize='unicode61 remove_diacritics 2'
-		)`,
 	}
 
 	for _, statement := range statements {
-		if _, err = s.writeDB.ExecContext(ctx, statement); err != nil {
+		if _, err := s.writeDB.ExecContext(ctx, statement); err != nil {
 			return err
 		}
-	}
-
-	if !hadCJKTable {
-		return s.rebuildLayeredCJKIndex(ctx)
 	}
 	return nil
-}
-
-func (s *Store) hasTable(ctx context.Context, table string) (bool, error) {
-	var exists int
-	err := s.writeDB.QueryRowContext(ctx, `
-SELECT 1
-FROM sqlite_master
-WHERE type IN ('table','view') AND name = ?
-LIMIT 1`, table).Scan(&exists)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return exists == 1, nil
-}
-
-// rebuildLayeredCJKIndex rebuilds the only supported CJK index shape.
-func (s *Store) rebuildLayeredCJKIndex(ctx context.Context) error {
-	rows, err := s.writeDB.QueryContext(ctx, `
-SELECT rowid, chunk_id, item_id, source, title, content, preview, ordinal, hash,
-       path, file_type, metadata_json, created_at, updated_at
-FROM chunks`)
-	if err != nil {
-		return err
-	}
-
-	var pending []model.Chunk
-	for rows.Next() {
-		chunk, scanErr := scanChunk(rows)
-		if scanErr != nil {
-			rows.Close()
-			return scanErr
-		}
-		pending = append(pending, chunk)
-	}
-	if err = rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-
-	if _, err := s.writeDB.ExecContext(ctx, "DROP TABLE IF EXISTS "+cjkLayeredFTSTable); err != nil {
-		return err
-	}
-	if _, err := s.writeDB.ExecContext(ctx, `CREATE VIRTUAL TABLE `+cjkLayeredFTSTable+` USING fts5(
-		grams,
-		content='',
-		tokenize='unicode61 remove_diacritics 2'
-	)`); err != nil {
-		return err
-	}
-	if len(pending) == 0 {
-		return nil
-	}
-
-	tx, err := s.writeDB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer rollbackUnlessDone(tx, &err)
-
-	for _, chunk := range pending {
-		if err = insertCJK(ctx, tx, chunk.RowID, chunk); err != nil {
-			return err
-		}
-	}
-
-	err = tx.Commit()
-	return err
 }
 
 // upsertItem writes item-level metadata without duplicating full content.
@@ -650,86 +587,6 @@ func applyChunkDiff(
 			if err := deleteChunk(ctx, tx, old); err != nil {
 				return err
 			}
-		}
-	}
-	return nil
-}
-
-func upsertItemFromChunkSource(ctx context.Context, tx *sql.Tx, entry PreparedItem) error {
-	oldChunks, err := loadChunks(ctx, tx, entry.Item.Source, entry.Item.ID)
-	if err != nil {
-		return err
-	}
-
-	item := entry.Item
-	seen := make(map[int]struct{}, len(oldChunks))
-	hasher := sha1.New()
-	wroteItem := false
-	chunkCount := 0
-
-	err = entry.ChunkSource(ctx, func(chunk model.Chunk) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if strings.TrimSpace(chunk.Content) == "" {
-			return nil
-		}
-		if !wroteItem {
-			if strings.TrimSpace(item.Preview) == "" {
-				item.Preview = chunk.Preview
-			}
-			if err := upsertItem(ctx, tx, item); err != nil {
-				return err
-			}
-			wroteItem = true
-		}
-		seen[chunk.Ordinal] = struct{}{}
-		_, _ = hasher.Write([]byte(chunk.Hash))
-		if old, ok := oldChunks[chunk.Ordinal]; ok {
-			if old.Hash == chunk.Hash && old.Title == chunk.Title {
-				chunkCount++
-				return nil
-			}
-			if err := replaceChunk(ctx, tx, old, chunk); err != nil {
-				return err
-			}
-			chunkCount++
-			return nil
-		}
-		if err := insertChunk(ctx, tx, item, chunk); err != nil {
-			return err
-		}
-		chunkCount++
-		return nil
-	})
-	if errors.Is(err, ErrSkipItem) {
-		if chunkCount > 0 || wroteItem {
-			return err
-		}
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-
-	if !wroteItem {
-		item.Preview = strings.TrimSpace(item.Preview)
-		if err := upsertItem(ctx, tx, item); err != nil {
-			return err
-		}
-	}
-	for ordinal, old := range oldChunks {
-		if _, ok := seen[ordinal]; !ok {
-			if err := deleteChunk(ctx, tx, old); err != nil {
-				return err
-			}
-		}
-	}
-	if entry.Fingerprint != nil {
-		fp := *entry.Fingerprint
-		fp.ContentHash = hex.EncodeToString(hasher.Sum(nil))
-		if err := upsertFileFingerprint(ctx, tx, fp); err != nil {
-			return err
 		}
 	}
 	return nil
