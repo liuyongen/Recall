@@ -188,7 +188,10 @@ function handleCoreLine(line: string): void {
   pending.delete(response.id);
 
   if (response.error) {
-    if (request.method === 'index_path' && isContextCanceled(response.error.message)) {
+    if (isContextCanceled(response.error.message) && isCancelableMethod(request.method)) {
+      // Context cancellation is a normal outcome for interruptible operations.
+      // Resolve with a cancellation marker instead of rejecting so callers
+      // don't see spurious errors in the console.
       request.resolve({ canceled: true });
       return;
     }
@@ -202,6 +205,11 @@ function handleCoreLine(line: string): void {
 function isContextCanceled(message: string): boolean {
   const lower = message.toLowerCase();
   return lower.includes('context canceled') || lower.includes('context cancelled');
+}
+
+/** Methods that support cancellation and should not surface context errors. */
+function isCancelableMethod(method: string): boolean {
+  return method === 'search' || method === 'index_path' || method === 'sync_browsers';
 }
 
 function rejectPending(reason: Error): void {
