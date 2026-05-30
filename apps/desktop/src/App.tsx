@@ -93,6 +93,7 @@ export function App() {
   const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const shouldResetResultsScrollRef = useRef(false);
   const searchSequenceRef = useRef(0);
+  const loadMoreResultsRef = useRef<() => Promise<void>>(async () => {});
 
   function setStatusAuto(s: Status) {
     setStatus(s);
@@ -279,6 +280,20 @@ export function App() {
     void api?.setWindowHeight(targetHeight);
   }, [api, query, results.length, elapsed, source, filtersOpen, status.text, showResults, indexProgress, indexing]);
 
+  loadMoreResultsRef.current = loadMoreResults;
+
+  useEffect(() => {
+    const container = resultsRef.current;
+    if (!container || !showResults) return;
+    const onScroll = () => {
+      if (container.scrollHeight - container.scrollTop - container.clientHeight < 80) {
+        void loadMoreResultsRef.current();
+      }
+    };
+    container.addEventListener('scroll', onScroll, { passive: true });
+    return () => container.removeEventListener('scroll', onScroll);
+  }, [showResults]);
+
   async function loadMoreResults() {
     if (!api || searching || !hasMore) {
       return;
@@ -436,6 +451,9 @@ export function App() {
     if (event.key === 'ArrowDown') {
       event.preventDefault();
       if (!results.length) return;
+      if (selected === results.length - 1 && hasMore && !searching) {
+        void loadMoreResults();
+      }
       setSelected((value) => Math.min(value + 1, results.length - 1));
     }
     if (event.key === 'ArrowUp') {
@@ -569,7 +587,7 @@ export function App() {
         <section className="results" ref={resultsRef} aria-live="polite">
           <div className="resultStack" ref={resultsContentRef}>
             <div className="resultCount">
-              已加载 {results.length} 条
+              {hasMore ? `已加载 ${results.length} 条` : `共 ${results.length} 条`}
             </div>
             {results.map((result, index) => (
               <article
