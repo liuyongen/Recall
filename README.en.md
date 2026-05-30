@@ -1,10 +1,10 @@
-# Recall
+# Recall — Local-First Personal Search
 
 [中文](README.md) | English
 
-Recall is a local-first desktop search engine for personal knowledge.
+**Recall** is a local-first desktop search app for personal knowledge management (PKM). It lets you search files, browser history, bookmarks, and downloads from a single fast launcher-style window — with all indexing and retrieval running entirely on your machine, no cloud required.
 
-It helps you find files, notes, browser history, and bookmarks from one fast command-style window, while keeping indexing and search fully on your machine.
+Built with **Electron + React** (UI) and a **Go** core backed by **SQLite FTS5** full-text search.
 
 ## Why Recall
 
