@@ -20,6 +20,7 @@ type CoreResponse = {
 const SEARCH_TIMEOUT_MS = 120_000;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const INDEX_TIMEOUT_MS = 0;
+const INDEX_PROGRESS_TIMEOUT_MS = 0;
 const SYNC_TIMEOUT_MS = 0;
 const CANCEL_TIMEOUT_MS = 1_500;
 
@@ -158,6 +159,9 @@ function timeoutFor(method: string): number {
   if (method === 'index_path') {
     return INDEX_TIMEOUT_MS;
   }
+  if (method === 'index_progress') {
+    return INDEX_PROGRESS_TIMEOUT_MS;
+  }
   if (method === 'sync_browsers') {
     return SYNC_TIMEOUT_MS;
   }
@@ -209,7 +213,7 @@ function isContextCanceled(message: string): boolean {
 
 /** Methods that support cancellation and should not surface context errors. */
 function isCancelableMethod(method: string): boolean {
-  return method === 'search' || method === 'index_path' || method === 'sync_browsers';
+  return method === 'search' || method === 'index_path' || method === 'sync_browsers' || method === 'index_progress';
 }
 
 function rejectPending(reason: Error): void {

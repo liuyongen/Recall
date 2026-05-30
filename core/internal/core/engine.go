@@ -420,17 +420,19 @@ func (e *Engine) syncFileAdapter(
 	summary := model.SyncSummary{AdapterID: adapter.ID()}
 	var maxUpdated int64
 
-	workers := fileIndexWorkers()
-	e.startProgress(strings.Join(adapter.Roots, ", "), workers)
+	maxWorkers := fileIndexMaxWorkers()
+	const initialWorkers = 2
+	e.startProgress(strings.Join(adapter.Roots, ", "), initialWorkers)
 	fingerprints, err := e.store.LoadFileFingerprints(ctx, adapter.Roots)
 	if err != nil {
 		e.finishProgress(summary, err)
 		return summary, err
 	}
 
-	// Larger batches reduce commit overhead for very large scans, but we keep
-	// this below 500 to avoid long write transactions and UI jitter.
-	const batchSize = 400
+	// Larger batches reduce SQLite commit overhead for big scans.
+	// 800 keeps write transactions short enough to not block search queries
+	// while significantly reducing per-file commit cost on HDD.
+	const batchSize = 800
 	batch := make([]storage.PreparedItem, 0, batchSize)
 
 	flushBatch := func() error {
@@ -459,9 +461,13 @@ func (e *Engine) syncFileAdapter(
 	prepared := make(chan preparedResult, 1024)
 	errCh := make(chan error, 1)
 	var fastSkipped atomic.Int64
+	var activeWorkers atomic.Int32
 
 	var workerWG sync.WaitGroup
-	for i := 0; i < workers; i++ {
+
+	// spawnWorker starts one additional extraction goroutine.
+	// Safe to call concurrently; new goroutines pick up from the shared paths channel.
+	spawnWorker := func() {
 		workerWG.Add(1)
 		go func() {
 			defer workerWG.Done()
@@ -494,6 +500,45 @@ func (e *Engine) syncFileAdapter(
 			}
 		}()
 	}
+
+	for i := 0; i < initialWorkers; i++ {
+		activeWorkers.Add(1)
+		spawnWorker()
+	}
+
+	// Adaptive scaling: after a warmup period measure files/sec and scale up
+	// if the throughput looks SSD-like. HDDs top out at ~150 files/sec;
+	// SSDs typically exceed 500 files/sec for small text files.
+	// We only scale up, never down, to keep logic simple.
+	const (
+		warmupDuration = 10 * time.Second
+		ssdThreshold   = 300.0 // files/sec above which we assume SSD
+	)
+	go func() {
+		timer := time.NewTimer(warmupDuration)
+		defer timer.Stop()
+		select {
+		case <-workCtx.Done():
+			return
+		case <-timer.C:
+		}
+		scanned := e.progressScanned.Load()
+		if scanned == 0 {
+			return
+		}
+		fps := float64(scanned) / warmupDuration.Seconds()
+		if fps < ssdThreshold {
+			return // HDD detected – keep current worker count
+		}
+		// SSD detected – scale up to max workers
+		current := int(activeWorkers.Load())
+		toAdd := maxWorkers - current
+		for i := 0; i < toAdd; i++ {
+			activeWorkers.Add(1)
+			spawnWorker()
+		}
+		e.startProgress(strings.Join(adapter.Roots, ", "), int(activeWorkers.Load()))
+	}()
 
 	go func() {
 		e.setProgressPhase("scanning")
@@ -792,13 +837,13 @@ func hashChunkText(text string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func fileIndexWorkers() int {
+func fileIndexMaxWorkers() int {
 	n := runtime.NumCPU()
-	if n <= 2 {
+	if n <= 1 {
 		return 1
 	}
 	// Keep one core free for UI/OS and cap to avoid over-scheduling on
-	// high-core machines. This tends to be a good throughput/stability balance.
+	// high-core machines.
 	workers := n - 1
 	if workers > 12 {
 		workers = 12

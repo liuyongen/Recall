@@ -984,6 +984,15 @@ type searchRankProfile struct {
 	tokens       []string
 	fileLike     bool
 	folderLike   bool
+	// filenameLike is true when the query itself looks like a filename (e.g. "rpc.php").
+	// In this mode exact filename matches are boosted aggressively over content hits.
+	filenameLike bool
+	// urlLike is true when the query looks like a URL; browser results are preferred.
+	urlLike bool
+	// bareNameQuery is true when the query is a single clean word with no extension
+	// or path separators (e.g. "texas", "myProject"). In this mode exact folder/file
+	// name matches are strongly preferred over content-only hits.
+	bareNameQuery bool
 }
 
 // newSearchRankProfile normalizes query text once for reranking candidates.
@@ -992,11 +1001,14 @@ func newSearchRankProfile(query string) searchRankProfile {
 	compact := strings.ReplaceAll(normalized, " ", "")
 	tokens := rankTokens(query)
 	return searchRankProfile{
-		query:        normalized,
-		compactQuery: compact,
-		tokens:       tokens,
-		fileLike:     looksFileLikeQuery(normalized, tokens),
-		folderLike:   looksFolderLikeQuery(normalized, tokens),
+		query:         normalized,
+		compactQuery:  compact,
+		tokens:        tokens,
+		fileLike:      looksFileLikeQuery(normalized, tokens),
+		folderLike:    looksFolderLikeQuery(normalized, tokens),
+		filenameLike:  looksFilenameLikeQuery(normalized),
+		urlLike:       looksURLLikeQuery(query),
+		bareNameQuery: looksBareNameQuery(normalized),
 	}
 }
 
@@ -1021,6 +1033,7 @@ func rankAdjustment(result model.SearchResult, profile searchRankProfile, now in
 	adjustment += exactQueryAdjustment(profile, title, name, nameWords, stem, pathBase, path, preview)
 	adjustment += tokenAdjustment(profile.tokens, title, name, nameWords, stem, pathBase, path, preview)
 	adjustment += sourceAdjustment(result, profile, path)
+	adjustment += folderBoostAdjustment(result, profile, name, nameWords, stem)
 	adjustment += noiseAdjustment(result, path, name)
 	adjustment += freshnessAdjustment(result.UpdatedAt, now)
 	return adjustment
@@ -1107,21 +1120,28 @@ func exactQueryAdjustment(profile searchRankProfile, title, name, nameWords, ste
 	}
 
 	var adjustment float64
+	var matchedOutsidePreview bool
+
 	switch {
 	case title == profile.query || name == profile.query || stem == profile.query || nameWords == profile.query || pathBase == profile.query:
 		adjustment -= 36
+		matchedOutsidePreview = true
 	case strings.Contains(title, profile.query) || strings.Contains(name, profile.query) || strings.Contains(nameWords, profile.query):
 		adjustment -= 20
+		matchedOutsidePreview = true
 	}
 
 	if strings.HasPrefix(name, profile.query) || strings.HasPrefix(nameWords, profile.query) || strings.HasPrefix(pathBase, profile.query) {
 		adjustment -= 10
+		matchedOutsidePreview = true
 	}
 	if strings.HasPrefix(stem, profile.query) {
 		adjustment -= 8
+		matchedOutsidePreview = true
 	}
 	if strings.Contains(path, profile.query) {
 		adjustment -= 8
+		matchedOutsidePreview = true
 	}
 	if strings.Contains(preview, profile.query) {
 		adjustment -= 2
@@ -1132,8 +1152,26 @@ func exactQueryAdjustment(profile searchRankProfile, title, name, nameWords, ste
 		compactName := strings.ReplaceAll(nameWords, " ", "")
 		if strings.Contains(compactTitle, profile.compactQuery) || strings.Contains(compactName, profile.compactQuery) {
 			adjustment -= 14
+			matchedOutsidePreview = true
 		}
 	}
+
+	// For filename-like queries (e.g. "rpc.php"), an exact filename match must
+	// dominate no matter how content-dense the competing documents are. BM25
+	// can produce very large negative scores for term-rich docs, so we apply
+	// an extra strong boost here to guarantee the right file surfaces first.
+	// Conversely, results that only matched inside preview content are demoted.
+	if profile.filenameLike {
+		switch {
+		case name == profile.query || stem == profile.query:
+			adjustment -= 80 // unambiguous filename match – overwhelm BM25 advantage
+		case strings.HasPrefix(name, profile.query) || strings.HasPrefix(stem, profile.query):
+			adjustment -= 30
+		case !matchedOutsidePreview:
+			adjustment += 18 // preview-only match for a filename query → demote
+		}
+	}
+
 	return adjustment
 }
 
@@ -1166,8 +1204,38 @@ func tokenAdjustment(tokens []string, title, name, nameWords, stem, pathBase, pa
 	return adjustment
 }
 
-// sourceAdjustment gives local files a small lift for file-like searches.
+// folderBoostAdjustment strongly promotes folder results when the query is a
+// bare name and a folder's name exactly matches. Also boosts exact-name file
+// matches for bare-name queries so they beat deep content-only hits.
+func folderBoostAdjustment(result model.SearchResult, profile searchRankProfile, name, nameWords, stem string) float64 {
+	if !profile.bareNameQuery || profile.filenameLike {
+		return 0
+	}
+	isFolder := strings.TrimPrefix(strings.ToLower(result.FileType), ".") == "folder"
+	q := profile.query
+	switch {
+	case isFolder && (name == q || nameWords == q):
+		// Folder name is an exact match — always surface first.
+		return -60
+	case isFolder && (strings.HasPrefix(name, q) || strings.HasPrefix(nameWords, q)):
+		return -25
+	case !isFolder && (name == q || stem == q || nameWords == q):
+		// File exact name match — also deserves a strong boost over content hits.
+		return -40
+	case !isFolder && (strings.HasPrefix(name, q) || strings.HasPrefix(stem, q)):
+		return -15
+	}
+	return 0
+}
+
+// sourceAdjustment gives local files a small lift for file-like searches,
+// and browser results a lift for URL-like searches.
 func sourceAdjustment(result model.SearchResult, profile searchRankProfile, path string) float64 {
+	// URL-like queries (e.g. "https://example.com") should surface browser history.
+	if profile.urlLike && isBrowserSource(result.Source) {
+		return -12.0
+	}
+
 	if result.Source != "file" {
 		return 0
 	}
@@ -1176,10 +1244,18 @@ func sourceAdjustment(result model.SearchResult, profile searchRankProfile, path
 	if profile.fileLike || path != "" {
 		adjustment -= 3
 	}
+	// Filename-like queries (e.g. "rpc.php") get an extra file-source boost so
+	// that file results compete better against browser entries on a level field.
+	if profile.filenameLike {
+		adjustment -= 4
+	}
 	fileType := strings.TrimPrefix(strings.ToLower(result.FileType), ".")
 	if fileType == "folder" {
 		if profile.folderLike {
 			adjustment -= 6
+		} else if profile.bareNameQuery {
+			// bareNameQuery folder handling is done in folderBoostAdjustment;
+			// don't apply the generic non-folderLike penalty here.
 		} else {
 			adjustment += 1.2
 		}
@@ -1249,6 +1325,55 @@ func rankTokens(input string) []string {
 		tokens = append(tokens, part)
 	}
 	return tokens
+}
+
+// looksBareNameQuery reports whether the query is a single clean word with no
+// file extension or path separators — e.g. "texas", "myProject", "recall".
+// These queries most likely target a specific file or folder by name.
+func looksBareNameQuery(query string) bool {
+	if query == "" {
+		return false
+	}
+	// Must be a single token (no whitespace).
+	if strings.ContainsAny(query, " \t") {
+		return false
+	}
+	// Must not look like a path or URL.
+	if strings.ContainsAny(query, `/\.`) {
+		return false
+	}
+	// Must be at least 2 characters to avoid false positives on single letters.
+	return len([]rune(query)) >= 2
+}
+
+// looksFilenameLikeQuery reports whether the query is itself a filename
+// (single token, no spaces, ends with a recognised extension, e.g. "rpc.php").
+func looksFilenameLikeQuery(query string) bool {
+	if strings.ContainsAny(query, " \t") {
+		return false
+	}
+	dotIdx := strings.LastIndex(query, ".")
+	if dotIdx <= 0 || dotIdx == len(query)-1 {
+		return false
+	}
+	ext := query[dotIdx+1:]
+	if len(ext) < 2 || len(ext) > 6 {
+		return false
+	}
+	for _, r := range ext {
+		if !unicode.IsLetter(r) && !unicode.IsNumber(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// looksURLLikeQuery reports whether the query resembles a URL.
+func looksURLLikeQuery(query string) bool {
+	lower := strings.ToLower(strings.TrimSpace(query))
+	return strings.HasPrefix(lower, "http://") ||
+		strings.HasPrefix(lower, "https://") ||
+		strings.Contains(lower, "://")
 }
 
 // looksFileLikeQuery reports whether the query appears to target local files.

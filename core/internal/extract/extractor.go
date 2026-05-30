@@ -28,10 +28,30 @@ type Config struct {
 const DefaultMaxBytes int64 = 100 * 1024 * 1024
 
 var textExtensions = map[string]struct{}{
-	".c": {}, ".cpp": {}, ".cs": {}, ".css": {}, ".csv": {},
-	".go": {}, ".h": {}, ".html": {}, ".java": {}, ".js": {},
-	".json": {}, ".jsx": {}, ".md": {}, ".py": {}, ".sql": {},
-	".ts": {}, ".tsx": {}, ".txt": {}, ".yaml": {}, ".yml": {},
+	// Web / frontend
+	".astro": {}, ".css": {}, ".ejs": {}, ".elm": {}, ".graphql": {},
+	".gql": {}, ".htm": {}, ".html": {}, ".js": {}, ".jsx": {},
+	".less": {}, ".mdx": {}, ".pug": {}, ".sass": {}, ".scss": {},
+	".svelte": {}, ".ts": {}, ".tsx": {}, ".vue": {},
+	// Systems / compiled
+	".c": {}, ".cc": {}, ".cpp": {}, ".cxx": {},
+	".h": {}, ".hpp": {}, ".hxx": {},
+	".cs": {}, ".fs": {}, ".fsx": {},
+	".go": {}, ".java": {}, ".kt": {}, ".kts": {},
+	".nim": {}, ".rs": {}, ".swift": {}, ".zig": {},
+	// Scripting / interpreted
+	".bash": {}, ".dart": {}, ".ex": {}, ".exs": {},
+	".jl": {}, ".lua": {}, ".php": {}, ".ps1": {},
+	".py": {}, ".r": {}, ".rb": {}, ".sh": {},
+	// JVM / functional
+	".clj": {}, ".cljs": {}, ".scala": {},
+	// Data / config / markup
+	".cfg": {}, ".conf": {}, ".csv": {}, ".env": {},
+	".ini": {}, ".json": {}, ".md": {}, ".proto": {},
+	".sol": {}, ".sql": {}, ".tf": {}, ".toml": {},
+	".txt": {}, ".xml": {}, ".yaml": {}, ".yml": {},
+	// Schema / query
+	".prisma": {},
 }
 
 var tikaExtensions = map[string]struct{}{
