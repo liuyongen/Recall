@@ -197,6 +197,19 @@ func (s *Store) UpsertItems(ctx context.Context, entries []PreparedItem) error {
 	})
 }
 
+// DeleteFilePath removes indexed chunks and fingerprints for a file or
+// directory subtree. It is used by the filesystem watcher when a watched path
+// is removed or renamed away.
+func (s *Store) DeleteFilePath(ctx context.Context, path string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	normalized := normalizeFingerprintPath(path)
+	return runShardsParallel(s.shards, func(sh *chunkShard) error {
+		return sh.deleteFilePath(ctx, normalized)
+	})
+}
+
 // Search executes an FTS5 query and returns ranked chunk results. Each shard
 // is queried in parallel and their over-sampled candidate sets are merged
 // before global reranking.

@@ -66,10 +66,11 @@ type Engine struct {
 	progressSkipped atomic.Int64
 	progressWritten atomic.Int64
 	// file watching
-	watcher *fsnotify.Watcher
-	watchMu sync.RWMutex
-	ctx     context.Context
-	cancel  context.CancelFunc
+	watcher     *fsnotify.Watcher
+	watchMu     sync.RWMutex
+	watchedDirs map[string]struct{}
+	ctx         context.Context
+	cancel      context.CancelFunc
 }
 
 // DefaultConfig resolves local-only defaults from environment variables.
@@ -108,11 +109,12 @@ func New(ctx context.Context, cfg Config) (*Engine, error) {
 			adapters.NewBrowserAdapter(adapters.BrowserEdge),
 			adapters.NewBrowserAdapter(adapters.BrowserFirefox),
 		},
-		startedAt: time.Now(),
-		maxBytes:  cfg.MaxBytes,
-		watcher:   watcher,
-		ctx:       engineCtx,
-		cancel:    cancel,
+		startedAt:   time.Now(),
+		maxBytes:    cfg.MaxBytes,
+		watcher:     watcher,
+		watchedDirs: map[string]struct{}{},
+		ctx:         engineCtx,
+		cancel:      cancel,
 	}
 
 	// Restore previously watched paths and perform incremental catch-up.
@@ -1393,7 +1395,7 @@ func (e *Engine) addToWatcher(root string) {
 		return
 	}
 	if !info.IsDir() {
-		_ = e.watcher.Add(filepath.Dir(root))
+		e.watchDir(filepath.Dir(root))
 		return
 	}
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, walkerr error) error {
@@ -1403,14 +1405,53 @@ func (e *Engine) addToWatcher(root string) {
 		if adapters.ShouldSkipDir(path, d) {
 			return filepath.SkipDir
 		}
-		_ = e.watcher.Add(path)
+		e.watchDir(path)
 		return nil
 	})
 }
 
-// watcherLoop processes fsnotify events and re-indexes changed files.
+func (e *Engine) watchDir(dir string) {
+	key := watchDirKey(dir)
+	e.watchMu.Lock()
+	defer e.watchMu.Unlock()
+	if _, ok := e.watchedDirs[key]; ok {
+		return
+	}
+	if err := e.watcher.Add(key); err == nil {
+		e.watchedDirs[key] = struct{}{}
+	}
+}
+
+func (e *Engine) unwatchSubtree(root string) {
+	key := watchDirKey(root)
+	prefix := key + string(filepath.Separator)
+	var dirs []string
+
+	e.watchMu.Lock()
+	for dir := range e.watchedDirs {
+		if dir == key || strings.HasPrefix(dir, prefix) {
+			delete(e.watchedDirs, dir)
+			dirs = append(dirs, dir)
+		}
+	}
+	e.watchMu.Unlock()
+
+	for _, dir := range dirs {
+		_ = e.watcher.Remove(dir)
+	}
+}
+
+func watchDirKey(path string) string {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		absolute = path
+	}
+	return filepath.Clean(absolute)
+}
+
+// watcherLoop processes fsnotify events and keeps file indexes current.
 func (e *Engine) watcherLoop() {
-	pending := make(map[string]struct{})
+	pending := make(map[string]fsnotify.Op)
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -1421,12 +1462,9 @@ func (e *Engine) watcherLoop() {
 			if !ok {
 				return
 			}
-			if event.Has(fsnotify.Create) || event.Has(fsnotify.Write) {
-				pending[event.Name] = struct{}{}
-				// Watch newly created subdirectories.
-				if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
-					_ = e.watcher.Add(event.Name)
-				}
+			if event.Has(fsnotify.Create) || event.Has(fsnotify.Write) ||
+				event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+				pending[event.Name] |= event.Op
 			}
 		case _, ok := <-e.watcher.Errors:
 			if !ok {
@@ -1437,24 +1475,56 @@ func (e *Engine) watcherLoop() {
 				continue
 			}
 			toProcess := pending
-			pending = make(map[string]struct{})
-			for path := range toProcess {
-				e.reindexFile(path)
+			pending = make(map[string]fsnotify.Op)
+			for path, op := range toProcess {
+				e.applyWatchEvent(path, op)
 			}
 		}
 	}
 }
 
-// reindexFile immediately re-indexes a single changed file.
-func (e *Engine) reindexFile(path string) {
+func (e *Engine) applyWatchEvent(path string, op fsnotify.Op) {
+	if op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+		e.removeIndexedPath(path)
+		return
+	}
+	if op&(fsnotify.Create|fsnotify.Write) != 0 {
+		e.reindexChangedPath(path)
+	}
+}
+
+func (e *Engine) removeIndexedPath(path string) {
+	e.indexMu.Lock()
+	defer e.indexMu.Unlock()
+
+	if err := e.store.DeleteFilePath(e.ctx, path); err != nil {
+		log.Printf("remove indexed path %s: %v", path, err)
+	}
+	e.unwatchSubtree(path)
+}
+
+// reindexChangedPath immediately re-indexes a changed file or new directory.
+func (e *Engine) reindexChangedPath(path string) {
 	e.indexMu.Lock()
 	defer e.indexMu.Unlock()
 
 	info, err := os.Stat(path)
 	if err != nil {
+		if err := e.store.DeleteFilePath(e.ctx, path); err != nil {
+			log.Printf("remove missing path %s: %v", path, err)
+		}
 		return
 	}
 	if !info.IsDir() && info.Size() > e.maxBytes {
+		return
+	}
+	if info.IsDir() {
+		e.addToWatcher(path)
+		adapter := adapters.NewFileAdapter([]string{path}, e.extractor, e.maxBytes)
+		_, err := e.syncFileAdapter(e.ctx, adapter, 0, pathSyncKey(path))
+		if err != nil {
+			log.Printf("reindex directory %s: %v", path, err)
+		}
 		return
 	}
 
@@ -1470,9 +1540,6 @@ func (e *Engine) reindexFile(path string) {
 		return
 	}
 	_ = e.store.UpsertItems(e.ctx, []storage.PreparedItem{entry})
-	if info.IsDir() {
-		e.addToWatcher(path)
-	}
 }
 
 // resyncWatched performs incremental catch-up for all watched roots after engine restart.

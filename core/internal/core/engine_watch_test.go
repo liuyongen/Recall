@@ -121,6 +121,61 @@ func TestAutoWatch(t *testing.T) {
 	t.Log("Auto-watch: modified file re-indexed automatically ✓")
 }
 
+func TestAutoWatchRemovesDeletedFiles(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "delete-me.txt")
+	writeFile(t, filePath, "auto watch deleted file content")
+
+	dbPath := filepath.Join(t.TempDir(), "watch-delete.db")
+	ctx := context.Background()
+	eng, err := core.New(ctx, core.Config{DBPath: dbPath})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	defer eng.Close()
+
+	if _, err := eng.IndexPath(ctx, model.IndexPathRequest{Path: dir}); err != nil {
+		t.Fatalf("IndexPath: %v", err)
+	}
+	assertSearchHits(t, eng, ctx, "auto watch deleted file content", 1)
+
+	if err := os.Remove(filePath); err != nil {
+		t.Fatalf("Remove(%s): %v", filePath, err)
+	}
+	time.Sleep(2500 * time.Millisecond)
+
+	assertSearchTotal(t, eng, ctx, "auto watch deleted file content", 0)
+}
+
+func TestAutoWatchRemovesDeletedDirectoryTree(t *testing.T) {
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	writeFile(t, filepath.Join(nested, "inside.txt"), "auto watch deleted directory content")
+
+	dbPath := filepath.Join(t.TempDir(), "watch-delete-dir.db")
+	ctx := context.Background()
+	eng, err := core.New(ctx, core.Config{DBPath: dbPath})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	defer eng.Close()
+
+	if _, err := eng.IndexPath(ctx, model.IndexPathRequest{Path: dir}); err != nil {
+		t.Fatalf("IndexPath: %v", err)
+	}
+	assertSearchHits(t, eng, ctx, "auto watch deleted directory content", 1)
+
+	if err := os.RemoveAll(nested); err != nil {
+		t.Fatalf("RemoveAll(%s): %v", nested, err)
+	}
+	time.Sleep(2500 * time.Millisecond)
+
+	assertSearchTotal(t, eng, ctx, "auto watch deleted directory content", 0)
+}
+
 // TestWatchPersistence verifies that watched paths survive an engine restart.
 func TestWatchPersistence(t *testing.T) {
 	dir := t.TempDir()
@@ -299,5 +354,16 @@ func assertSearchHits(t *testing.T, eng *core.Engine, ctx context.Context, query
 	}
 	if res.Total < minHits {
 		t.Errorf("Search(%q): expected >=%d results, got %d", query, minHits, res.Total)
+	}
+}
+
+func assertSearchTotal(t *testing.T, eng *core.Engine, ctx context.Context, query string, want int) {
+	t.Helper()
+	res, err := eng.Search(ctx, model.SearchRequest{Query: query, Limit: 10})
+	if err != nil {
+		t.Fatalf("Search(%q): %v", query, err)
+	}
+	if res.Total != want {
+		t.Errorf("Search(%q): expected %d results, got %d", query, want, res.Total)
 	}
 }

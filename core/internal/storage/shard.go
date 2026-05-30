@@ -502,6 +502,75 @@ FROM chunks WHERE source = ? AND item_id = ?`, source, itemID)
 	return nil
 }
 
+func (s *chunkShard) deleteFilePath(ctx context.Context, normalizedPath string) error {
+	if normalizedPath == "" {
+		return nil
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	return retryBusy(ctx, func() (err error) {
+		tx, err := s.writeDB.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer rollbackUnlessDone(tx, &err)
+
+		pathExpr := `lower(replace(path, '\', '/'))`
+		likePath := escapeLikePath(strings.TrimRight(normalizedPath, "/")) + "/%"
+		rows, err := tx.QueryContext(ctx, `
+SELECT rowid, chunk_id, item_id, source, title, content, preview, ordinal, hash,
+       path, file_type, metadata_json, created_at, updated_at
+FROM chunks
+WHERE source = 'file' AND (`+pathExpr+` = ? OR `+pathExpr+` LIKE ? ESCAPE '\')`,
+			normalizedPath, likePath)
+		if err != nil {
+			return err
+		}
+		var existing []model.Chunk
+		for rows.Next() {
+			chunk, err := scanChunk(rows)
+			if err != nil {
+				rows.Close()
+				return err
+			}
+			existing = append(existing, chunk)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+
+		for _, chunk := range existing {
+			if err := deleteChunk(ctx, tx, chunk); err != nil {
+				return err
+			}
+		}
+		_, err = tx.ExecContext(ctx, `
+DELETE FROM file_fingerprints
+WHERE path = ? OR path LIKE ? ESCAPE '\'`,
+			normalizedPath, likePath)
+		if err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+}
+
+func escapeLikePath(path string) string {
+	var b strings.Builder
+	b.Grow(len(path))
+	for _, r := range path {
+		switch r {
+		case '\\', '%', '_':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 // searchShard runs an FTS query against this shard and returns candidates
 // with rowids already encoded with the shard index.
 func (s *chunkShard) searchShard(
