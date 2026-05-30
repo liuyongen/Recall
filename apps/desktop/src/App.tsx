@@ -769,7 +769,7 @@ function IndexProgressView({ progress }: { progress: IndexProgress }) {
     <div className="indexProgress" title={formatIndexProgress(progress)}>
       <div className="indexProgressTop">
         <span className="indexPhase">{phase}</span>
-        <span>{total > 0 ? `${scanned}/${total}` : `已扫描 ${scanned}`}</span>
+        {progress.phase !== 'starting' && <span>{total > 0 ? `${scanned}/${total}` : `已扫描 ${scanned}`}</span>}
         {percent !== null ? <span>{percent}%</span> : null}
         {progress.files_per_sec > 0 ? <span>{progress.files_per_sec.toFixed(1)} 文件/秒</span> : null}
         {progress.eta_ms > 0 ? <span>ETA {formatDuration(progress.eta_ms)}</span> : null}

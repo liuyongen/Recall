@@ -421,8 +421,7 @@ func (e *Engine) syncFileAdapter(
 	var maxUpdated int64
 
 	maxWorkers := fileIndexMaxWorkers()
-	const initialWorkers = 2
-	e.startProgress(strings.Join(adapter.Roots, ", "), initialWorkers)
+	e.startProgress(strings.Join(adapter.Roots, ", "), maxWorkers)
 	fingerprints, err := e.store.LoadFileFingerprints(ctx, adapter.Roots)
 	if err != nil {
 		e.finishProgress(summary, err)
@@ -465,8 +464,7 @@ func (e *Engine) syncFileAdapter(
 
 	var workerWG sync.WaitGroup
 
-	// spawnWorker starts one additional extraction goroutine.
-	// Safe to call concurrently; new goroutines pick up from the shared paths channel.
+	// spawnWorker starts one extraction goroutine that reads from the shared paths channel.
 	spawnWorker := func() {
 		workerWG.Add(1)
 		go func() {
@@ -501,18 +499,23 @@ func (e *Engine) syncFileAdapter(
 		}()
 	}
 
-	for i := 0; i < initialWorkers; i++ {
+	// Start with the full worker pool immediately so throughput is maximised
+	// from the beginning. The index is CPU-bound (tokenisation + FTS5 writes)
+	// rather than purely IO-bound, so more workers help even on HDDs.
+	for i := 0; i < maxWorkers; i++ {
 		activeWorkers.Add(1)
 		spawnWorker()
 	}
 
-	// Adaptive scaling: after a warmup period measure files/sec and scale up
-	// if the throughput looks SSD-like. HDDs top out at ~150 files/sec;
-	// SSDs typically exceed 500 files/sec for small text files.
-	// We only scale up, never down, to keep logic simple.
+	// Adaptive scaling: after a warmup period measure files/sec and spawn
+	// additional workers if the disk appears to be SSD-class. HDDs top out at
+	// ~150 files/sec; SSDs typically exceed 500 files/sec for small text files.
+	// Only files actually sent to workers are counted (fast-skipped unchanged
+	// files are excluded so a re-index on HDD doesn't falsely trigger SSD mode).
 	const (
 		warmupDuration = 10 * time.Second
 		ssdThreshold   = 300.0 // files/sec above which we assume SSD
+		ssdMaxWorkers  = 24    // cap for SSD burst scaling
 	)
 	go func() {
 		timer := time.NewTimer(warmupDuration)
@@ -522,17 +525,19 @@ func (e *Engine) syncFileAdapter(
 			return
 		case <-timer.C:
 		}
-		scanned := e.progressScanned.Load()
-		if scanned == 0 {
+		// Use progressIndexed+progressSkipped (worker-processed files) rather
+		// than progressScanned which includes fast-skipped unchanged files.
+		processed := e.progressIndexed.Load() + e.progressSkipped.Load()
+		if processed == 0 {
 			return
 		}
-		fps := float64(scanned) / warmupDuration.Seconds()
+		fps := float64(processed) / warmupDuration.Seconds()
 		if fps < ssdThreshold {
-			return // HDD detected – keep current worker count
+			return // HDD-like speed – current worker count is already optimal
 		}
-		// SSD detected – scale up to max workers
+		// SSD detected – scale up beyond the default cap
 		current := int(activeWorkers.Load())
-		toAdd := maxWorkers - current
+		toAdd := ssdMaxWorkers - current
 		for i := 0; i < toAdd; i++ {
 			activeWorkers.Add(1)
 			spawnWorker()
