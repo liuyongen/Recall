@@ -37,25 +37,21 @@ function placeWindowLikeLauncher(win: BrowserWindow): void {
 }
 
 /** Resolve a non-empty tray icon source for the current platform. */
-async function resolveTrayIcon(): Promise<NativeImage> {
+function resolveTrayIcon(): NativeImage {
   if (process.platform !== 'win32') {
     return nativeImage.createEmpty();
   }
 
-  try {
-    const iconFromExe = await app.getFileIcon(process.execPath, { size: 'small' });
-    if (!iconFromExe.isEmpty()) {
-      return iconFromExe;
-    }
-  } catch {
-    // Fall through to local icon path.
-  }
-
-  const localIconPath = path.resolve(app.getAppPath(), 'build', 'icon.ico');
-  if (fs.existsSync(localIconPath)) {
-    const localIcon = nativeImage.createFromPath(localIconPath);
-    if (!localIcon.isEmpty()) {
-      return localIcon;
+  // Prefer a dedicated transparent tray PNG, fall back to the app ICO.
+  // Avoid app.getFileIcon() — it wraps the icon with Windows shell decoration
+  // (opaque background) which produces a gray border in the system tray.
+  for (const name of ['tray.png', 'icon.ico']) {
+    const iconPath = path.resolve(app.getAppPath(), 'build', name);
+    if (fs.existsSync(iconPath)) {
+      const icon = nativeImage.createFromPath(iconPath);
+      if (!icon.isEmpty()) {
+        return icon;
+      }
     }
   }
 
@@ -155,7 +151,7 @@ async function registerShellControls(): Promise<void> {
   globalShortcut.register('Control+W', hideWindow);
 
   try {
-    const trayIcon = await resolveTrayIcon();
+    const trayIcon = resolveTrayIcon();
     if (trayIcon.isEmpty()) {
       console.warn('[tray] icon is empty, skip tray setup');
       return;
