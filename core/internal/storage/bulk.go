@@ -5,21 +5,18 @@ import (
 	"sync"
 )
 
-// Tunable for the per-shard bulk batch size. With multi-row INSERTs in
-// bulk mode each commit produces ~2048 chunks worth of work at constant
-// cost regardless of how big the index has already grown.
+// bulkShardBatchSize 控制每个分片写入 goroutine 一次提交的条目数上限。
+// 每个条目可能包含多个分块，真正的 SQL 插入窗口由 shard_bulk.go 再拆分。
 const bulkShardBatchSize = 2048
 
-// BulkSession streams prepared items into one writer goroutine per shard.
+// BulkSession 将准备好的条目流式送入每个分片各自的写入 goroutine。
 //
-// Each shard's transaction now also holds the file_fingerprints for the
-// files it just wrote — fingerprints were moved out of the main DB into
-// the shards (sharded by the same key as the file's chunks). This kills
-// the previous serialization point where every batch had to wait for a
-// single main-DB writer.
+// 每个分片的事务现在也包含刚写入文件的 file_fingerprints；
+// 指纹已经从主库移入分片库，并按与文件分块相同的 key 分片。
+// 这样消除了旧设计里每个批次都必须等待单个主库写入器的串行点。
 //
-// There is no per-batch barrier across shards: each shard commits at its
-// own pace, so a momentarily slow shard never stalls the fast ones.
+// 分片之间没有每批次屏障：每个分片按自己的节奏提交，
+// 因而瞬时变慢的分片不会拖住更快的分片。
 type BulkSession struct {
 	store     *Store
 	ctx       context.Context
@@ -31,14 +28,12 @@ type BulkSession struct {
 	onWritten func(int)
 }
 
-// BeginBulk starts one writer goroutine per shard. onWritten, if non-nil,
-// is invoked after each shard commit with the number of items that landed
-// on disk so callers can drive a progress UI.
+// BeginBulk 为每个分片启动一个写入 goroutine。onWritten 非 nil 时，
+// 会在每个分片提交后用已落盘条目数调用，方便调用方驱动进度 UI。
 //
-// Every shard is switched into bulk mode (FTS5 automerge=0,
-// synchronous=OFF) so commits stay at constant cost regardless of how
-// large the index has already grown. Close() restores normal mode and
-// performs a one-shot merge + WAL truncate on every shard.
+// 每个分片都会切换到批量模式（FTS5 automerge=0、synchronous=OFF），
+// 降低批量写入期间的提交成本。Close() 会恢复普通模式，
+// 并执行轻量 checkpoint；重型 FTS 整理由周期性或手动 Optimize 处理。
 func (s *Store) BeginBulk(ctx context.Context, onWritten func(int)) *BulkSession {
 	bctx, cancel := context.WithCancel(ctx)
 	sess := &BulkSession{
@@ -62,9 +57,8 @@ func (s *Store) BeginBulk(ctx context.Context, onWritten func(int)) *BulkSession
 	return sess
 }
 
-// Submit routes an item to its assigned shard. Blocks if that shard's
-// queue is full so back-pressure naturally flows back to extraction workers.
-// Returns the recorded error once any writer has failed.
+// Submit 将条目路由到所属分片。如果该分片队列已满会阻塞，
+// 让背压自然传回提取工作线程。任一写入器失败后会返回已记录的错误。
 func (b *BulkSession) Submit(item PreparedItem) error {
 	if err := b.ctx.Err(); err != nil {
 		return b.combinedErr()
@@ -78,9 +72,9 @@ func (b *BulkSession) Submit(item PreparedItem) error {
 	}
 }
 
-// Close flushes pending items, waits for all writers, runs the post-bulk
-// FTS5 merge + WAL truncate on every shard in parallel, and returns the
-// first error any writer encountered. Must be called exactly once.
+// Close 刷新待写入条目，等待所有写入器完成，并行恢复每个分片的批量模式设置，
+// 然后返回任一写入器遇到的首个错误。
+// 必须且只能调用一次。
 func (b *BulkSession) Close() error {
 	for _, ch := range b.shardCh {
 		close(ch)
@@ -146,7 +140,7 @@ func (b *BulkSession) runShard(sh *chunkShard, ch chan PreparedItem) {
 
 	for item := range ch {
 		if b.ctx.Err() != nil {
-			continue // drain to unblock producers; do not commit anything
+			continue // 继续排空以解除生产者阻塞，但不提交任何内容
 		}
 		batch = append(batch, item)
 		if len(batch) >= bulkShardBatchSize {

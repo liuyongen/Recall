@@ -5,7 +5,7 @@ import (
 	"unicode"
 )
 
-// BuildFTSQuery turns user input into an FTS5 MATCH expression.
+// BuildFTSQuery 将用户输入转换为 FTS5 MATCH 表达式。
 func BuildFTSQuery(input string) string {
 	input = strings.TrimSpace(input)
 	if input == "" {
@@ -27,7 +27,7 @@ func BuildFTSQuery(input string) string {
 	return strings.Join(terms, " AND ")
 }
 
-// looksAdvanced detects explicit FTS5 syntax supplied by the user.
+// looksAdvanced 检测用户是否显式提供了 FTS5 语法。
 func looksAdvanced(input string) bool {
 	upper := strings.ToUpper(input)
 	return strings.ContainsAny(input, "\"*()") ||
@@ -37,14 +37,14 @@ func looksAdvanced(input string) bool {
 		strings.Contains(upper, "NEAR")
 }
 
-// tokenizeSimple extracts conservative terms from plain search text.
+// tokenizeSimple 从普通搜索文本中提取保守的搜索词。
 func tokenizeSimple(input string) []string {
 	return strings.FieldsFunc(input, func(r rune) bool {
 		return !(unicode.IsLetter(r) || unicode.IsNumber(r) || r == '_' || r > unicode.MaxASCII)
 	})
 }
 
-// isBareToken reports whether a token can safely use FTS prefix syntax.
+// isBareToken 判断词元是否可以安全使用 FTS 前缀语法。
 func isBareToken(token string) bool {
 	if token == "" {
 		return false
@@ -57,7 +57,7 @@ func isBareToken(token string) bool {
 	return true
 }
 
-// quoteFTS escapes a token as an FTS5 phrase.
+// quoteFTS 将词元转义为 FTS5 短语。
 func quoteFTS(token string) string {
 	return `"` + strings.ReplaceAll(token, `"`, `""`) + `"`
 }

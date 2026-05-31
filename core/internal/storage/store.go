@@ -24,16 +24,16 @@ import (
 const cjkLayeredFTSTable = "chunk_cjk_layered_fts"
 const noCJKGrams = "\x00"
 
-// Config holds SQLite store settings.
+// Config 保存 SQLite 存储配置。
 type Config struct {
 	Path string
 }
 
-// Store wraps SQLite access for metadata, chunks, and FTS5.
-// db is the read-only connection pool; writeDB is the single write connection.
-// chunks/FTS data is sharded into multiple sibling SQLite files (see shard.go)
-// so multiple workers can write in true parallel — one SQLite file = one
-// writer at a time, but N shards = N concurrent writers.
+// Store 封装 SQLite 元数据、分块和 FTS5 访问。
+// db 是主库只读连接池，writeDB 是主库单写连接。
+// 分块和 FTS 数据拆到多个相邻的 SQLite 分片文件中（见 shard.go），
+// 让多个工作线程可以真正并行写入：单个 SQLite 文件一次只能有一个写入器，
+// 但 N 个分片就能有 N 个并发写入器。
 type Store struct {
 	db      *sql.DB
 	writeDB *sql.DB
@@ -41,26 +41,25 @@ type Store struct {
 	shards  []*chunkShard
 }
 
-// ChunkSource streams prepared chunks to the store. It must be repeatable so a
-// busy SQLite transaction can be retried from the beginning.
+// ChunkSource 将准备好的分块流式送入存储层。它必须可重复执行，
+// 这样 SQLite busy 导致事务重试时可以从头重放。
 type ChunkSource func(context.Context, func(model.Chunk) error) error
 
-// ErrSkipItem tells a batch write to ignore a volatile file without failing the
-// whole indexing run.
+// ErrSkipItem 告诉批量写入忽略易变文件，而不让整个索引流程失败。
 var ErrSkipItem = errors.New("skip item")
 
-// PreparedItem is a preprocessed item ready to be persisted in a batch.
+// PreparedItem 是已经预处理、可批量持久化的条目。
 type PreparedItem struct {
 	Item        model.DataItem
 	Chunks      []model.Chunk
 	ChunkSource ChunkSource
 	Fingerprint *FileFingerprint
-	// IsNew indicates the item has never been indexed before. When true the
-	// store skips the existing-chunks query and goes straight to inserts.
+	// IsNew 表示条目此前从未索引过。为 true 时，
+	// 存储层会跳过既有分块查询，直接插入。
 	IsNew bool
 }
 
-// FileFingerprint stores a cheap file-change signature for fast skip checks.
+// FileFingerprint 保存廉价的文件变化签名，用于快速跳过未变化文件。
 type FileFingerprint struct {
 	Path        string
 	Size        int64
@@ -68,9 +67,9 @@ type FileFingerprint struct {
 	ContentHash string
 }
 
-// Open creates the SQLite database and applies production pragmas.
-// Two separate connection pools are used: a read pool for concurrent searches
-// and a single write connection so indexing never blocks search.
+// Open 创建 SQLite 数据库并应用生产环境 pragma。
+// 主库使用独立读写连接池：读池服务并发查询，单写连接只维护主库元数据。
+// 分块索引写入由各分片自己的写连接承担。
 func Open(ctx context.Context, cfg Config) (*Store, error) {
 	if cfg.Path == "" {
 		return nil, fmt.Errorf("database path is required")
@@ -79,7 +78,7 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 		return nil, err
 	}
 
-	// Read pool: as many connections as CPU cores so searches run in parallel.
+	// 读池：连接数按 CPU 核心数配置，让搜索可以并行运行。
 	readDB, err := sql.Open("sqlite", cfg.Path)
 	if err != nil {
 		return nil, err
@@ -92,8 +91,8 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	readDB.SetMaxIdleConns(readers)
 	readDB.SetConnMaxLifetime(0)
 
-	// Write pool: single connection. SQLite only allows one writer at a time
-	// and writeMu already serializes our writes, so one connection is optimal.
+	// 写池：单连接。SQLite 同一数据库一次只允许一个写入器，
+	// 且 writeMu 已经串行化主库写入，所以单连接最合适。
 	writeDB, err := sql.Open("sqlite", cfg.Path)
 	if err != nil {
 		_ = readDB.Close()
@@ -129,7 +128,7 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	return store, nil
 }
 
-// Close releases the main connection pools and all shard pools.
+// Close 释放主库连接池和所有分片连接池。
 func (s *Store) Close() error {
 	var firstErr error
 	for _, sh := range s.shards {
@@ -146,15 +145,15 @@ func (s *Store) Close() error {
 	return firstErr
 }
 
-// SQLiteVersion returns the linked SQLite engine version.
+// SQLiteVersion 返回当前链接的 SQLite 引擎版本。
 func (s *Store) SQLiteVersion(ctx context.Context) (string, error) {
 	var version string
 	err := s.db.QueryRowContext(ctx, "SELECT sqlite_version()").Scan(&version)
 	return version, err
 }
 
-// Optimize asks SQLite to update query planner and FTS statistics across the
-// main DB and every shard. Shards run in parallel.
+// Optimize 请求 SQLite 更新主库和所有分片的查询规划器与 FTS 统计信息。
+// 分片会并行执行。
 func (s *Store) Optimize(ctx context.Context) error {
 	if err := runShardsParallel(s.shards, func(sh *chunkShard) error {
 		return sh.optimize(ctx)
@@ -167,16 +166,15 @@ func (s *Store) Optimize(ctx context.Context) error {
 	return err
 }
 
-// UpsertItem incrementally applies changed chunks for a data item.
+// UpsertItem 为一个数据条目增量应用变化分块。
 func (s *Store) UpsertItem(ctx context.Context, item model.DataItem, chunks []model.Chunk) error {
 	return s.UpsertItems(ctx, []PreparedItem{{Item: item, Chunks: chunks}})
 }
 
-// UpsertItems applies a batch of items by fan-out: each shard writes its
-// assigned chunks AND fingerprints in one transaction, fully in parallel.
-// There is no main-DB step — the items table has been removed and
-// fingerprints now live inside each shard (sharded by the same key as the
-// file's chunks).
+// UpsertItems 通过扇出方式应用一批条目：每个分片在一个事务中写入
+// 分配给自己的分块和指纹，并且分片之间完全并行。
+// 这里没有主库写入步骤：items 表已移除，指纹也已经移到分片里，
+// 并按与文件分块相同的 key 分片。
 func (s *Store) UpsertItems(ctx context.Context, entries []PreparedItem) error {
 	if len(entries) == 0 {
 		return nil
@@ -197,9 +195,8 @@ func (s *Store) UpsertItems(ctx context.Context, entries []PreparedItem) error {
 	})
 }
 
-// DeleteFilePath removes indexed chunks and fingerprints for a file or
-// directory subtree. It is used by the filesystem watcher when a watched path
-// is removed or renamed away.
+// DeleteFilePath 删除某个文件或目录子树对应的索引分块和指纹。
+// 文件系统 watcher 在受监控路径被删除或改名移走时会使用它。
 func (s *Store) DeleteFilePath(ctx context.Context, path string) error {
 	if strings.TrimSpace(path) == "" {
 		return nil
@@ -210,9 +207,8 @@ func (s *Store) DeleteFilePath(ctx context.Context, path string) error {
 	})
 }
 
-// Search executes an FTS5 query and returns ranked chunk results. Each shard
-// is queried in parallel and their over-sampled candidate sets are merged
-// before global reranking.
+// Search 执行 FTS5 查询并返回排序后的分块结果。
+// 每个分片会并行查询，过采样候选集会先合并，再做全局重排。
 func (s *Store) Search(ctx context.Context, req model.SearchRequest, ftsQuery string) ([]model.SearchResult, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
@@ -244,8 +240,7 @@ func (s *Store) Search(ctx context.Context, req model.SearchRequest, ftsQuery st
 	return page, hasMore, nil
 }
 
-// searchAllShards fans out an FTS query to every shard and merges the
-// over-sampled candidate sets.
+// searchAllShards 将 FTS 查询扇出到每个分片，并合并过采样候选集。
 func (s *Store) searchAllShards(
 	ctx context.Context,
 	req model.SearchRequest,
@@ -276,7 +271,7 @@ func (s *Store) searchAllShards(
 	if err := <-errCh; err != nil {
 		return nil, err
 	}
-	// Merge candidate sets.
+	// 合并候选集。
 	merged := make([]model.SearchResult, 0, perShardLimit*len(s.shards))
 	for r := range resultsCh {
 		merged = append(merged, r...)
@@ -284,7 +279,7 @@ func (s *Store) searchAllShards(
 	return merged, nil
 }
 
-// GetWatchedPaths returns all paths that should be actively watched.
+// GetWatchedPaths 返回所有应主动监控的路径。
 func (s *Store) GetWatchedPaths(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT path FROM watched_paths ORDER BY added_at")
 	if err != nil {
@@ -302,7 +297,7 @@ func (s *Store) GetWatchedPaths(ctx context.Context) ([]string, error) {
 	return paths, rows.Err()
 }
 
-// AddWatchedPath records a path for persistent watching.
+// AddWatchedPath 记录一个需要持久监控的路径。
 func (s *Store) AddWatchedPath(ctx context.Context, path string) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -315,7 +310,7 @@ func (s *Store) AddWatchedPath(ctx context.Context, path string) error {
 	})
 }
 
-// RemoveWatchedPath removes a path from persistent watching.
+// RemoveWatchedPath 从持久监控列表中移除路径。
 func (s *Store) RemoveWatchedPath(ctx context.Context, path string) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -325,7 +320,7 @@ func (s *Store) RemoveWatchedPath(ctx context.Context, path string) error {
 	})
 }
 
-// GetSyncTime returns the last successful sync time for an adapter.
+// GetSyncTime 返回适配器上次成功同步时间。
 func (s *Store) GetSyncTime(ctx context.Context, adapterID string) (int64, error) {
 	var lastSync sql.NullInt64
 	err := s.db.QueryRowContext(ctx,
@@ -341,7 +336,7 @@ func (s *Store) GetSyncTime(ctx context.Context, adapterID string) (int64, error
 	return lastSync.Int64, nil
 }
 
-// SetSyncTime records the last successful sync time for an adapter.
+// SetSyncTime 记录适配器上次成功同步时间。
 func (s *Store) SetSyncTime(ctx context.Context, adapterID string, lastSync int64) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -360,9 +355,9 @@ ON CONFLICT(adapter_id) DO UPDATE SET
 	})
 }
 
-// LoadFileFingerprints returns known file signatures under the provided roots.
-// Fingerprints live inside each shard now (same shard as the file's chunks),
-// so this fans the query out to every shard in parallel.
+// LoadFileFingerprints 返回指定根路径下已知的文件签名。
+// 指纹现在存放在各分片中（与文件分块位于同一分片），
+// 因此这里会把查询并行扇出到每个分片。
 func (s *Store) LoadFileFingerprints(ctx context.Context, roots []string) (map[string]FileFingerprint, error) {
 	if len(roots) == 0 {
 		return map[string]FileFingerprint{}, nil
@@ -424,7 +419,7 @@ func (s *Store) LoadFileFingerprints(ctx context.Context, roots []string) (map[s
 	return fingerprints, nil
 }
 
-// configure applies SQLite pragmas to the given connection pool.
+// configure 将 SQLite pragma 应用到给定连接池。
 func (s *Store) configure(ctx context.Context, db *sql.DB) error {
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL",
@@ -434,10 +429,8 @@ func (s *Store) configure(ctx context.Context, db *sql.DB) error {
 		"PRAGMA temp_store=MEMORY",
 		"PRAGMA mmap_size=30000000000",
 		"PRAGMA foreign_keys=ON",
-		// PRAGMA optimize is intentionally omitted here: it can block for
-		// hundreds of milliseconds on large databases and would delay the
-		// engine from serving the first search request. periodicOptimize
-		// handles this in the background every 30 minutes.
+		// 这里刻意不执行 PRAGMA optimize：大数据库上它可能阻塞数百毫秒，
+		// 延迟引擎响应第一次搜索请求。periodicOptimize 会每 30 分钟在后台处理。
 	}
 	for _, pragma := range pragmas {
 		if _, err := db.ExecContext(ctx, pragma); err != nil {
@@ -447,9 +440,8 @@ func (s *Store) configure(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// WarmCache runs lightweight read queries that pull the FTS5 index root nodes
-// into SQLite's page cache. Call this once in a goroutine right after Open so
-// that the first real search hits warm pages instead of cold disk.
+// WarmCache 执行轻量读取查询，把 FTS5 索引根节点拉进 SQLite 页缓存。
+// Open 后在 goroutine 中调用一次即可，让第一次真实搜索命中热页而不是冷磁盘。
 func (s *Store) WarmCache(ctx context.Context) {
 	for _, sh := range s.shards {
 		if ctx.Err() != nil {
@@ -459,22 +451,21 @@ func (s *Store) WarmCache(ctx context.Context) {
 	}
 }
 
-// migrate creates the main-DB tables: items, file fingerprints, sync state,
-// and watched paths. Chunks and FTS indexes live in shard DB files (see
-// shard.go). Legacy chunks/FTS tables left over in the main DB from earlier
-// versions are dropped so a clean rebuild populates the shards.
+// migrate 创建主库仍负责的表：sync_state 和 watched_paths。
+// 分块、FTS 索引和文件指纹位于分片数据库文件中（见 shard.go）。
+// 旧版本遗留在主库中的 chunks/FTS/items/指纹表会被删除，
+// 之后通过重新索引干净地填充分片。
 func (s *Store) migrate(ctx context.Context) error {
-	// Drop any legacy chunks/FTS tables from the main DB. They used to live
-	// here before sharding; now the main DB only stores sync_state and
-	// watched_paths. A clean rebuild via re-indexing repopulates the shards.
+	// 删除主库中的旧 chunks/FTS 表。分片前它们曾经放在这里；
+	// 现在主库只保存 sync_state 和 watched_paths。
+	// 重新索引会干净地填充分片。
 	legacyDrops := []string{
 		"DROP TABLE IF EXISTS chunk_fts",
 		"DROP TABLE IF EXISTS " + cjkLayeredFTSTable,
 		"DROP TABLE IF EXISTS chunks",
-		// items was never read by any query — pure write amplification.
-		// file_fingerprints moved into per-shard databases so each file's
-		// chunks + fingerprint commit together in one transaction, removing
-		// the cross-shard barrier and the single main-DB writer bottleneck.
+		// items 从未被任何查询读取，只会带来写放大。
+		// file_fingerprints 已移入分片库，让每个文件的分块和指纹
+		// 在同一个事务里提交，移除跨分片屏障和单主库写入器瓶颈。
 		"DROP TABLE IF EXISTS items",
 		"DROP TABLE IF EXISTS file_fingerprints",
 	}
@@ -504,7 +495,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	return nil
 }
 
-// applyChunkDiff performs delete, replace, and insert operations atomically.
+// applyChunkDiff 原子地执行删除、替换和插入操作。
 func applyChunkDiff(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -539,7 +530,7 @@ func applyChunkDiff(
 	return nil
 }
 
-// loadChunks loads existing chunks keyed by ordinal.
+// loadChunks 加载既有分块，并以 ordinal 建立索引。
 func loadChunks(ctx context.Context, tx *sql.Tx, source string, itemID string) (map[int]model.Chunk, error) {
 	rows, err := tx.QueryContext(ctx, `
 SELECT rowid, chunk_id, item_id, source, title, content, preview, ordinal, hash,
@@ -561,7 +552,7 @@ FROM chunks WHERE source = ? AND item_id = ?`, source, itemID)
 	return chunks, rows.Err()
 }
 
-// insertChunk stores a new chunk and indexes it in FTS5.
+// insertChunk 存储新分块并写入 FTS5 索引。
 func insertChunk(ctx context.Context, tx *sql.Tx, item model.DataItem, chunk model.Chunk) error {
 	rowID, err := insertChunkRow(ctx, tx, item, chunk)
 	if err != nil {
@@ -576,7 +567,7 @@ func insertChunk(ctx context.Context, tx *sql.Tx, item model.DataItem, chunk mod
 	return insertCJK(ctx, tx, rowID, chunk)
 }
 
-// replaceChunk swaps a changed chunk while preserving its rowid.
+// replaceChunk 在保留 rowid 的同时替换变化的分块。
 func replaceChunk(ctx context.Context, tx *sql.Tx, old model.Chunk, next model.Chunk) error {
 	if err := deleteFTS(ctx, tx, old); err != nil {
 		return err
@@ -594,7 +585,7 @@ func replaceChunk(ctx context.Context, tx *sql.Tx, old model.Chunk, next model.C
 	return insertCJK(ctx, tx, old.RowID, next)
 }
 
-// deleteChunk removes a chunk from metadata and the FTS index.
+// deleteChunk 从元数据和 FTS 索引中删除分块。
 func deleteChunk(ctx context.Context, tx *sql.Tx, old model.Chunk) error {
 	if err := deleteFTS(ctx, tx, old); err != nil {
 		return err
@@ -603,7 +594,7 @@ func deleteChunk(ctx context.Context, tx *sql.Tx, old model.Chunk) error {
 	return err
 }
 
-// deleteFTS emits the contentless FTS5 delete command.
+// deleteFTS 发出 contentless FTS5 删除命令。
 func deleteFTS(ctx context.Context, tx *sql.Tx, old model.Chunk) error {
 	if _, err := tx.ExecContext(ctx,
 		"INSERT INTO chunk_fts(chunk_fts, rowid, title, content) VALUES('delete', ?, ?, ?)",
@@ -614,7 +605,7 @@ func deleteFTS(ctx context.Context, tx *sql.Tx, old model.Chunk) error {
 	return deleteCJK(ctx, tx, old)
 }
 
-// insertCJK stores generated CJK bigrams for substring search.
+// insertCJK 存储生成的 CJK 二元词，用于子串搜索。
 func insertCJK(ctx context.Context, tx *sql.Tx, rowID int64, chunk model.Chunk) error {
 	grams := chunk.CJKGrams
 	if grams == noCJKGrams {
@@ -633,7 +624,7 @@ func insertCJK(ctx context.Context, tx *sql.Tx, rowID int64, chunk model.Chunk) 
 	return err
 }
 
-// deleteCJK removes generated CJK bigrams for a chunk.
+// deleteCJK 删除某个分块生成的 CJK 二元词。
 func deleteCJK(ctx context.Context, tx *sql.Tx, chunk model.Chunk) error {
 	grams := cjkGrams(cjkIndexText(chunk))
 	if grams == "" {
@@ -654,10 +645,9 @@ func cjkIndexText(chunk model.Chunk) string {
 	return chunk.Title + " " + chunk.Preview
 }
 
-// PrecomputeCJKGrams returns the CJK bigram string that would be persisted
-// for a chunk. Callers (e.g. workers preparing items off the writer thread)
-// can store the result in Chunk.CJKGrams to skip the CPU work inside the
-// writer's transaction.
+// PrecomputeCJKGrams 返回某个分块将要持久化的 CJK 二元词串。
+// 调用方（例如在写入线程外准备条目的工作线程）可以把结果存进 Chunk.CJKGrams，
+// 从而跳过写事务里的 CPU 计算。
 func PrecomputeCJKGrams(chunk model.Chunk) string {
 	if isASCII(chunk.Title) && isASCII(chunk.Content) && isASCII(chunk.Preview) {
 		return noCJKGrams
@@ -665,7 +655,7 @@ func PrecomputeCJKGrams(chunk model.Chunk) string {
 	return cjkGrams(cjkIndexText(chunk))
 }
 
-// insertChunkRow inserts chunk metadata and returns the SQLite rowid.
+// insertChunkRow 插入分块元数据并返回 SQLite rowid。
 func insertChunkRow(ctx context.Context, tx *sql.Tx, item model.DataItem, chunk model.Chunk) (int64, error) {
 	meta, err := encodeMetadata(chunk.Metadata)
 	if err != nil {
@@ -686,7 +676,7 @@ VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	return result.LastInsertId()
 }
 
-// updateChunkRow updates chunk metadata for an existing rowid.
+// updateChunkRow 更新既有 rowid 对应的分块元数据。
 func updateChunkRow(ctx context.Context, tx *sql.Tx, rowID int64, chunk model.Chunk) error {
 	meta, err := encodeMetadata(chunk.Metadata)
 	if err != nil {
@@ -711,7 +701,7 @@ func normalizeFingerprintPath(path string) string {
 	return strings.ToLower(filepath.ToSlash(filepath.Clean(absolute)))
 }
 
-// buildSearchWhere builds SQL predicates and bound arguments.
+// buildSearchWhere 构造 SQL 谓词和绑定参数。
 func buildSearchWhere(req model.SearchRequest, ftsQuery string, table string) ([]string, []any) {
 	where := []string{table + " MATCH ?"}
 	args := []any{ftsQuery}
@@ -734,7 +724,7 @@ func buildSearchWhere(req model.SearchRequest, ftsQuery string, table string) ([
 	return where, args
 }
 
-// normalizeSearchLimit keeps paging efficient with a sane default.
+// normalizeSearchLimit 用合理默认值保持分页高效。
 func normalizeSearchLimit(limit int) int {
 	if limit <= 0 {
 		return 50
@@ -752,7 +742,7 @@ func normalizeSearchOffset(offset int) int {
 	return offset
 }
 
-// searchCandidateLimit over-samples FTS hits before human-friendly reranking.
+// searchCandidateLimit 在面向用户的重排前对 FTS 命中进行过采样。
 func searchCandidateLimit(window int) int {
 	if window <= 0 {
 		window = 50
@@ -770,7 +760,7 @@ func paginateResults(results []model.SearchResult, offset int, limit int) ([]mod
 	return results[offset:end], hasMore
 }
 
-// rerankSearchResults adjusts FTS order using title, path, source, and freshness.
+// rerankSearchResults 根据标题、路径、来源和新鲜度调整 FTS 顺序。
 func rerankSearchResults(results []model.SearchResult, query string, limit int) []model.SearchResult {
 	if len(results) == 0 {
 		return results
@@ -802,18 +792,18 @@ type searchRankProfile struct {
 	tokens       []string
 	fileLike     bool
 	folderLike   bool
-	// filenameLike is true when the query itself looks like a filename (e.g. "rpc.php").
-	// In this mode exact filename matches are boosted aggressively over content hits.
+	// filenameLike 表示查询本身像文件名（例如 "rpc.php"）。
+	// 该模式会强力提升精确文件名匹配，使其压过内容命中。
 	filenameLike bool
-	// urlLike is true when the query looks like a URL; browser results are preferred.
+	// urlLike 表示查询像 URL；该模式会优先浏览器结果。
 	urlLike bool
-	// bareNameQuery is true when the query is a single clean word with no extension
-	// or path separators (e.g. "texas", "myProject"). In this mode exact folder/file
-	// name matches are strongly preferred over content-only hits.
+	// bareNameQuery 表示查询是单个干净词，不含扩展名或路径分隔符
+	// （例如 "texas"、"myProject"）。该模式会强烈优先精确文件夹 / 文件名匹配，
+	// 使其排在纯内容命中之前。
 	bareNameQuery bool
 }
 
-// newSearchRankProfile normalizes query text once for reranking candidates.
+// newSearchRankProfile 为候选重排预先规范化一次查询文本。
 func newSearchRankProfile(query string) searchRankProfile {
 	normalized := normalizeRankText(query)
 	compact := strings.ReplaceAll(normalized, " ", "")
@@ -830,7 +820,7 @@ func newSearchRankProfile(query string) searchRankProfile {
 	}
 }
 
-// rankAdjustment returns a lower-is-better score adjustment for one result.
+// rankAdjustment 返回单条结果的分数调整值，数值越低越好。
 func rankAdjustment(result model.SearchResult, profile searchRankProfile, now int64) float64 {
 	var adjustment float64
 	title := normalizeRankText(result.Title)
@@ -844,7 +834,7 @@ func rankAdjustment(result model.SearchResult, profile searchRankProfile, now in
 	}
 	stem := strings.TrimSuffix(name, normalizeRankText(filepath.Ext(name)))
 	preview := normalizeRankText(result.Preview)
-	// Pre-compute these once instead of recalculating inside each sub-function.
+	// 这些值预先计算一次，避免在各个子函数里重复计算。
 	nameWords := normalizeNameWords(name)
 	pathBase := normalizeNameWords(normalizeRankText(filepath.Base(path)))
 
@@ -857,7 +847,7 @@ func rankAdjustment(result model.SearchResult, profile searchRankProfile, now in
 	return adjustment
 }
 
-// dedupeSearchResults keeps the best chunk for each source item.
+// dedupeSearchResults 为每个来源条目保留最佳分块。
 func dedupeSearchResults(results []model.SearchResult) []model.SearchResult {
 	seen := make(map[string]struct{}, len(results))
 	deduped := results[:0]
@@ -874,7 +864,7 @@ func dedupeSearchResults(results []model.SearchResult) []model.SearchResult {
 	return deduped
 }
 
-// filterNoisySearchResults hides generated app/cache files unless requested.
+// filterNoisySearchResults 隐藏生成型应用 / 缓存文件，除非查询明确需要。
 func filterNoisySearchResults(results []model.SearchResult, profile searchRankProfile) []model.SearchResult {
 	if allowsNoisySearchResults(profile) {
 		return results
@@ -889,7 +879,7 @@ func filterNoisySearchResults(results []model.SearchResult, profile searchRankPr
 	return filtered
 }
 
-// allowsNoisySearchResults keeps app bundle hits for explicit app queries.
+// allowsNoisySearchResults 为明确的应用查询保留应用包命中。
 func allowsNoisySearchResults(profile searchRankProfile) bool {
 	for _, term := range noisyQueryTerms {
 		if strings.Contains(profile.query, term) {
@@ -904,7 +894,7 @@ func allowsNoisySearchResults(profile searchRankProfile) bool {
 	return false
 }
 
-// resultDedupeKey returns a stable identity for grouped search results.
+// resultDedupeKey 返回用于搜索结果分组的稳定身份。
 func resultDedupeKey(result model.SearchResult) string {
 	if result.Path != "" {
 		return "path:" + normalizePathText(result.Path)
@@ -921,7 +911,7 @@ func resultDedupeKey(result model.SearchResult) string {
 	return ""
 }
 
-// isBrowserSource reports whether a source comes from browser history data.
+// isBrowserSource 判断来源是否来自浏览器历史数据。
 func isBrowserSource(source string) bool {
 	switch source {
 	case "chrome", "edge", "firefox":
@@ -931,7 +921,7 @@ func isBrowserSource(source string) bool {
 	}
 }
 
-// exactQueryAdjustment rewards direct title, filename, path, and preview hits.
+// exactQueryAdjustment 奖励标题、文件名、路径和预览中的直接命中。
 func exactQueryAdjustment(profile searchRankProfile, title, name, nameWords, stem, pathBase, path, preview string) float64 {
 	if profile.query == "" {
 		return 0
@@ -974,26 +964,24 @@ func exactQueryAdjustment(profile searchRankProfile, title, name, nameWords, ste
 		}
 	}
 
-	// For filename-like queries (e.g. "rpc.php"), an exact filename match must
-	// dominate no matter how content-dense the competing documents are. BM25
-	// can produce very large negative scores for term-rich docs, so we apply
-	// an extra strong boost here to guarantee the right file surfaces first.
-	// Conversely, results that only matched inside preview content are demoted.
+	// 对文件名式查询（例如 "rpc.php"），精确文件名匹配必须压过内容再密集的文档。
+	// BM25 会给术语密集文档很大的负分，所以这里额外强力加权，保证正确文件浮到前面。
+	// 反过来，只在预览内容中命中的结果会被降权。
 	if profile.filenameLike {
 		switch {
 		case name == profile.query || stem == profile.query:
-			adjustment -= 80 // unambiguous filename match – overwhelm BM25 advantage
+			adjustment -= 80 // 明确文件名匹配，压过 BM25 优势
 		case strings.HasPrefix(name, profile.query) || strings.HasPrefix(stem, profile.query):
 			adjustment -= 30
 		case !matchedOutsidePreview:
-			adjustment += 18 // preview-only match for a filename query → demote
+			adjustment += 18 // 文件名查询只命中预览内容，降权
 		}
 	}
 
 	return adjustment
 }
 
-// tokenAdjustment rewards partial query terms in high-signal fields.
+// tokenAdjustment 奖励高信号字段中的部分查询词命中。
 func tokenAdjustment(tokens []string, title, name, nameWords, stem, pathBase, path, preview string) float64 {
 	var adjustment float64
 	for _, token := range tokens {
@@ -1022,9 +1010,8 @@ func tokenAdjustment(tokens []string, title, name, nameWords, stem, pathBase, pa
 	return adjustment
 }
 
-// folderBoostAdjustment strongly promotes folder results when the query is a
-// bare name and a folder's name exactly matches. Also boosts exact-name file
-// matches for bare-name queries so they beat deep content-only hits.
+// folderBoostAdjustment 在裸名称查询精确命中文件夹名时强力提升文件夹结果。
+// 对裸名称查询中的精确文件名匹配也会加权，使其压过深层内容命中。
 func folderBoostAdjustment(result model.SearchResult, profile searchRankProfile, name, nameWords, stem string) float64 {
 	if !profile.bareNameQuery || profile.filenameLike {
 		return 0
@@ -1033,12 +1020,12 @@ func folderBoostAdjustment(result model.SearchResult, profile searchRankProfile,
 	q := profile.query
 	switch {
 	case isFolder && (name == q || nameWords == q):
-		// Folder name is an exact match — always surface first.
+		// 文件夹名精确匹配，始终优先浮到前面。
 		return -60
 	case isFolder && (strings.HasPrefix(name, q) || strings.HasPrefix(nameWords, q)):
 		return -25
 	case !isFolder && (name == q || stem == q || nameWords == q):
-		// File exact name match — also deserves a strong boost over content hits.
+		// 文件名精确匹配，也应明显优先于内容命中。
 		return -40
 	case !isFolder && (strings.HasPrefix(name, q) || strings.HasPrefix(stem, q)):
 		return -15
@@ -1046,10 +1033,9 @@ func folderBoostAdjustment(result model.SearchResult, profile searchRankProfile,
 	return 0
 }
 
-// sourceAdjustment gives local files a small lift for file-like searches,
-// and browser results a lift for URL-like searches.
+// sourceAdjustment 对文件式搜索略微提升本地文件，对 URL 式搜索提升浏览器结果。
 func sourceAdjustment(result model.SearchResult, profile searchRankProfile, path string) float64 {
-	// URL-like queries (e.g. "https://example.com") should surface browser history.
+	// URL 式查询（例如 "https://example.com"）应优先浮出浏览器历史。
 	if profile.urlLike && isBrowserSource(result.Source) {
 		return -12.0
 	}
@@ -1062,8 +1048,8 @@ func sourceAdjustment(result model.SearchResult, profile searchRankProfile, path
 	if profile.fileLike || path != "" {
 		adjustment -= 3
 	}
-	// Filename-like queries (e.g. "rpc.php") get an extra file-source boost so
-	// that file results compete better against browser entries on a level field.
+	// 文件名式查询（例如 "rpc.php"）会额外提升文件来源，
+	// 让文件结果能在同等字段上更好地与浏览器条目竞争。
 	if profile.filenameLike {
 		adjustment -= 4
 	}
@@ -1072,8 +1058,8 @@ func sourceAdjustment(result model.SearchResult, profile searchRankProfile, path
 		if profile.folderLike {
 			adjustment -= 6
 		} else if profile.bareNameQuery {
-			// bareNameQuery folder handling is done in folderBoostAdjustment;
-			// don't apply the generic non-folderLike penalty here.
+			// bareNameQuery 的文件夹处理在 folderBoostAdjustment 中完成；
+			// 这里不要再套用通用的非 folderLike 惩罚。
 		} else {
 			adjustment += 1.2
 		}
@@ -1086,7 +1072,7 @@ func sourceAdjustment(result model.SearchResult, profile searchRankProfile, path
 	return adjustment
 }
 
-// noiseAdjustment demotes generated app bundles and browser cache artifacts.
+// noiseAdjustment 降低生成型应用包和浏览器缓存产物的排名。
 func noiseAdjustment(result model.SearchResult, path string, name string) float64 {
 	var adjustment float64
 	if isNoisySearchPath(path) {
@@ -1101,7 +1087,7 @@ func noiseAdjustment(result model.SearchResult, path string, name string) float6
 	return adjustment
 }
 
-// freshnessAdjustment lightly favors recent personal data without hiding old hits.
+// freshnessAdjustment 轻微偏向近期个人数据，但不隐藏旧命中。
 func freshnessAdjustment(updatedAt int64, now int64) float64 {
 	if updatedAt <= 0 || now <= 0 {
 		return 0
@@ -1124,7 +1110,7 @@ func freshnessAdjustment(updatedAt int64, now int64) float64 {
 	}
 }
 
-// rankTokens extracts searchable query terms for reranking only.
+// rankTokens 提取仅用于重排的可搜索查询词。
 func rankTokens(input string) []string {
 	seen := make(map[string]struct{})
 	parts := strings.FieldsFunc(strings.ToLower(input), func(r rune) bool {
@@ -1145,27 +1131,26 @@ func rankTokens(input string) []string {
 	return tokens
 }
 
-// looksBareNameQuery reports whether the query is a single clean word with no
-// file extension or path separators — e.g. "texas", "myProject", "recall".
-// These queries most likely target a specific file or folder by name.
+// looksBareNameQuery 判断查询是否是单个干净词，且不含文件扩展名或路径分隔符，
+// 例如 "texas"、"myProject"、"recall"。这类查询很可能是在按名称找特定文件或文件夹。
 func looksBareNameQuery(query string) bool {
 	if query == "" {
 		return false
 	}
-	// Must be a single token (no whitespace).
+	// 必须是单个词元（无空白）。
 	if strings.ContainsAny(query, " \t") {
 		return false
 	}
-	// Must not look like a path or URL.
+	// 不能像路径或 URL。
 	if strings.ContainsAny(query, `/\.`) {
 		return false
 	}
-	// Must be at least 2 characters to avoid false positives on single letters.
+	// 至少 2 个字符，避免单字母误判。
 	return len([]rune(query)) >= 2
 }
 
-// looksFilenameLikeQuery reports whether the query is itself a filename
-// (single token, no spaces, ends with a recognised extension, e.g. "rpc.php").
+// looksFilenameLikeQuery 判断查询本身是否像文件名：
+// 单个词元、无空格、以可识别扩展名结尾，例如 "rpc.php"。
 func looksFilenameLikeQuery(query string) bool {
 	if strings.ContainsAny(query, " \t") {
 		return false
@@ -1186,7 +1171,7 @@ func looksFilenameLikeQuery(query string) bool {
 	return true
 }
 
-// looksURLLikeQuery reports whether the query resembles a URL.
+// looksURLLikeQuery 判断查询是否像 URL。
 func looksURLLikeQuery(query string) bool {
 	lower := strings.ToLower(strings.TrimSpace(query))
 	return strings.HasPrefix(lower, "http://") ||
@@ -1194,7 +1179,7 @@ func looksURLLikeQuery(query string) bool {
 		strings.Contains(lower, "://")
 }
 
-// looksFileLikeQuery reports whether the query appears to target local files.
+// looksFileLikeQuery 判断查询是否像是在查找本地文件。
 func looksFileLikeQuery(query string, tokens []string) bool {
 	if strings.ContainsAny(query, `./\`) {
 		return true
@@ -1236,12 +1221,12 @@ func normalizeNameWords(name string) string {
 	return normalizeRankText(replacer.Replace(name))
 }
 
-// normalizeRankText lowercases and compacts whitespace for ranking compares.
+// normalizeRankText 转为小写并压缩空白，用于排名比较。
 func normalizeRankText(input string) string {
 	return strings.Join(strings.Fields(strings.ToLower(input)), " ")
 }
 
-// normalizePathText converts paths to a lowercase slash-separated form.
+// normalizePathText 将路径转换为小写、斜杠分隔的形式。
 func normalizePathText(path string) string {
 	if path == "" {
 		return ""
@@ -1249,14 +1234,14 @@ func normalizePathText(path string) string {
 	return strings.ToLower(filepath.ToSlash(filepath.Clean(path)))
 }
 
-// isPersonalFilePath reports whether a path is in a common user document area.
+// isPersonalFilePath 判断路径是否位于常见用户文档区域。
 func isPersonalFilePath(path string) bool {
 	return strings.Contains(path, "/desktop/") ||
 		strings.Contains(path, "/documents/") ||
 		strings.Contains(path, "/downloads/")
 }
 
-// isNoisySearchPath detects generated app bundles and cache-heavy locations.
+// isNoisySearchPath 检测生成型应用包和缓存密集位置。
 func isNoisySearchPath(path string) bool {
 	if path == "" {
 		return false
@@ -1269,7 +1254,7 @@ func isNoisySearchPath(path string) bool {
 	return false
 }
 
-// isGeneratedAsset reports whether a result looks like a generated web asset.
+// isGeneratedAsset 判断结果是否像生成出来的 Web 资源。
 func isGeneratedAsset(fileType string, name string) bool {
 	switch strings.TrimPrefix(strings.ToLower(fileType), ".") {
 	case "map", "min", "bundle":
@@ -1351,7 +1336,7 @@ var noisyQueryTermSet = map[string]struct{}{
 	"webcontent":  {},
 }
 
-// scanChunk converts one SQL row into a Chunk.
+// scanChunk 将一行 SQL 结果转换为 Chunk。
 func scanChunk(rows interface {
 	Scan(dest ...any) error
 }) (model.Chunk, error) {
@@ -1369,8 +1354,8 @@ func scanChunk(rows interface {
 	return chunk, nil
 }
 
-// scanSearchCandidate converts one search row into a SearchResult.
-// metadata_json is decoded inline to avoid a second query.
+// scanSearchCandidate 将一行搜索结果转换为 SearchResult。
+// metadata_json 会就地解码，避免第二次查询。
 func scanSearchCandidate(rows *sql.Rows) (model.SearchResult, error) {
 	var result model.SearchResult
 	var metadataJSON string
@@ -1386,7 +1371,7 @@ func scanSearchCandidate(rows *sql.Rows) (model.SearchResult, error) {
 	return result, nil
 }
 
-// encodeMetadata marshals metadata maps for SQLite storage.
+// encodeMetadata 将元数据 map 序列化为 SQLite 存储字符串。
 func encodeMetadata(metadata map[string]any) (string, error) {
 	if metadata == nil {
 		return "{}", nil
@@ -1398,7 +1383,7 @@ func encodeMetadata(metadata map[string]any) (string, error) {
 	return string(data), nil
 }
 
-// decodeMetadata unmarshals metadata and falls back to an empty map.
+// decodeMetadata 反序列化元数据，失败时回退为空 map。
 func decodeMetadata(value string) map[string]any {
 	metadata := make(map[string]any)
 	if value == "" {
@@ -1410,7 +1395,7 @@ func decodeMetadata(value string) map[string]any {
 	return metadata
 }
 
-// rollbackUnlessDone rolls back failed transactions.
+// rollbackUnlessDone 回滚失败事务。
 func rollbackUnlessDone(tx *sql.Tx, err *error) {
 	if *err != nil {
 		_ = tx.Rollback()
@@ -1444,7 +1429,7 @@ func isBusyError(err error) bool {
 		strings.Contains(text, "busy")
 }
 
-// buildCJKQuery builds an FTS query from generated CJK bigrams.
+// buildCJKQuery 根据生成的 CJK 二元词构造 FTS 查询。
 func buildCJKQuery(input string) string {
 	terms := cjkGramList(input)
 	if len(terms) == 0 {
@@ -1457,12 +1442,12 @@ func buildCJKQuery(input string) string {
 	return strings.Join(quoted, " AND ")
 }
 
-// cjkGrams returns space-separated CJK bigrams for FTS indexing.
+// cjkGrams 返回以空格分隔的 CJK 二元词，用于 FTS 索引。
 func cjkGrams(input string) string {
 	return strings.Join(cjkGramList(input), " ")
 }
 
-// cjkGramList generates unique CJK unigrams and bigrams from contiguous runs.
+// cjkGramList 从连续 CJK 片段生成去重的一元词和二元词。
 func cjkGramList(input string) []string {
 	if isASCII(input) {
 		return nil
@@ -1502,7 +1487,7 @@ func cjkGramList(input string) []string {
 	return terms
 }
 
-// isCJK reports whether a rune is in common CJK ranges.
+// isCJK 判断 rune 是否处于常见 CJK 范围。
 func isCJK(r rune) bool {
 	return (r >= 0x3400 && r <= 0x4DBF) ||
 		(r >= 0x4E00 && r <= 0x9FFF) ||
@@ -1518,7 +1503,7 @@ func isASCII(input string) bool {
 	return true
 }
 
-// quoteMatch escapes a generated token for FTS MATCH syntax.
+// quoteMatch 为 FTS MATCH 语法转义生成词元。
 func quoteMatch(token string) string {
 	return `"` + strings.ReplaceAll(token, `"`, `""`) + `"`
 }

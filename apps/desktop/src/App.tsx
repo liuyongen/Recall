@@ -130,7 +130,7 @@ export function App() {
           setIndexProgress(progress);
         }
       } catch {
-        // Progress is best-effort; indexPath still owns completion/errors.
+        // 进度只是尽力上报；完成状态和错误仍由 indexPath 负责。
       }
     }
 
@@ -172,7 +172,7 @@ export function App() {
       try {
         await api.cancelSearch();
       } catch {
-        // Best-effort cancel to avoid piling up stale requests.
+        // 尽力取消，避免堆积过期请求。
       }
       if (controller.signal.aborted || searchSequence !== searchSequenceRef.current) {
         return;

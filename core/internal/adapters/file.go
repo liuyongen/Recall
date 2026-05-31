@@ -16,7 +16,7 @@ import (
 	"recall/core/internal/model"
 )
 
-// FileAdapter indexes user-selected local files and directories.
+// FileAdapter 索引用户选择的本地文件和目录。
 type FileAdapter struct {
 	Roots       []string
 	Extractor   extract.Extractor
@@ -25,7 +25,7 @@ type FileAdapter struct {
 	ContentOnly bool
 }
 
-// FileCandidate is a cheap stat-derived file candidate for indexing.
+// FileCandidate 是基于 stat 信息得到的轻量索引候选文件。
 type FileCandidate struct {
 	Path      string
 	Size      int64
@@ -33,10 +33,10 @@ type FileCandidate struct {
 	IsDir     bool
 }
 
-// CandidateFilter decides whether a candidate is already known unchanged.
+// CandidateFilter 判断候选文件是否已知未变化。
 type CandidateFilter func(FileCandidate) (skip bool, known bool)
 
-// NewFileAdapter creates a file adapter for the provided roots.
+// NewFileAdapter 为给定根路径创建文件适配器。
 func NewFileAdapter(roots []string, extractor extract.Extractor, maxBytes int64) *FileAdapter {
 	if maxBytes <= 0 {
 		maxBytes = extract.DefaultMaxBytes
@@ -44,17 +44,17 @@ func NewFileAdapter(roots []string, extractor extract.Extractor, maxBytes int64)
 	return &FileAdapter{Roots: roots, Extractor: extractor, MaxBytes: maxBytes}
 }
 
-// ID returns the stable adapter identifier.
+// ID 返回稳定的适配器标识。
 func (a *FileAdapter) ID() string {
 	return "file"
 }
 
-// Name returns a human-readable adapter name.
+// Name 返回适合用户阅读的适配器名称。
 func (a *FileAdapter) Name() string {
 	return "Local Files"
 }
 
-// IsAvailable reports whether at least one configured root exists.
+// IsAvailable 判断是否至少有一个配置的根路径存在。
 func (a *FileAdapter) IsAvailable() bool {
 	for _, root := range a.Roots {
 		if _, err := os.Stat(root); err == nil {
@@ -64,7 +64,7 @@ func (a *FileAdapter) IsAvailable() bool {
 	return false
 }
 
-// GetIncrementalData extracts files changed after the supplied Unix timestamp.
+// GetIncrementalData 提取给定 Unix 时间戳之后变化的文件。
 func (a *FileAdapter) GetIncrementalData(lastSyncTime int64) ([]model.DataItem, error) {
 	items := make([]model.DataItem, 0, 256)
 	err := a.WalkIncrementalData(context.Background(), lastSyncTime, func(item model.DataItem) error {
@@ -74,7 +74,7 @@ func (a *FileAdapter) GetIncrementalData(lastSyncTime int64) ([]model.DataItem, 
 	return items, err
 }
 
-// WalkIncrementalData streams changed file items to a visitor.
+// WalkIncrementalData 将变化的文件条目流式传给 visitor。
 func (a *FileAdapter) WalkIncrementalData(
 	ctx context.Context,
 	lastSyncTime int64,
@@ -88,7 +88,7 @@ func (a *FileAdapter) WalkIncrementalData(
 	return nil
 }
 
-// WalkIncrementalPaths streams candidate file paths changed after lastSyncTime.
+// WalkIncrementalPaths 流式产出 lastSyncTime 之后变化的候选文件路径。
 func (a *FileAdapter) WalkIncrementalPaths(
 	ctx context.Context,
 	lastSyncTime int64,
@@ -99,7 +99,7 @@ func (a *FileAdapter) WalkIncrementalPaths(
 	})
 }
 
-// WalkIncrementalCandidates streams candidate files with stat metadata.
+// WalkIncrementalCandidates 流式产出带 stat 元数据的候选文件。
 func (a *FileAdapter) WalkIncrementalCandidates(
 	ctx context.Context,
 	lastSyncTime int64,
@@ -114,7 +114,7 @@ func (a *FileAdapter) WalkIncrementalCandidates(
 	return nil
 }
 
-// walkRoot visits a file or directory tree and appends changed items.
+// walkRoot 遍历文件或目录树，并追加变化条目。
 func (a *FileAdapter) walkRoot(
 	ctx context.Context,
 	root string,
@@ -404,7 +404,7 @@ func (q *dirQueue) wake() {
 	q.mu.Unlock()
 }
 
-// extractFile extracts one changed file into a DataItem.
+// extractFile 将一个变化文件提取为 DataItem。
 func (a *FileAdapter) extractFile(ctx context.Context, path string, lastSyncTime int64) (model.DataItem, bool) {
 	if shouldSkipFilePath(path) {
 		return model.DataItem{}, false
@@ -442,7 +442,7 @@ func (a *FileAdapter) extractFile(ctx context.Context, path string, lastSyncTime
 	}, true
 }
 
-// ShouldSkipDir filters noisy directories that should not be indexed.
+// ShouldSkipDir 过滤不应索引的高噪声目录。
 func ShouldSkipDir(path string, entry os.DirEntry) bool {
 	if entry == nil || !entry.IsDir() {
 		return false
@@ -466,12 +466,12 @@ func ShouldSkipDir(path string, entry os.DirEntry) bool {
 	return runtime.GOOS == "windows" && isWindowsSystemDir(path)
 }
 
-// shouldSkipFilePath filters generated files inside known noisy directories.
+// shouldSkipFilePath 过滤已知高噪声目录中的生成文件。
 func shouldSkipFilePath(path string) bool {
 	return isNoisyFilePath(path)
 }
 
-// shouldSkipFileName filters hidden, temp, and known-noise file names.
+// shouldSkipFileName 过滤隐藏、临时和已知噪声文件名。
 func shouldSkipFileName(name string) bool {
 	lower := strings.ToLower(strings.TrimSpace(name))
 	if lower == "" {
@@ -491,7 +491,7 @@ func shouldSkipFileName(name string) bool {
 	return false
 }
 
-// isNoisyFilePath detects app bundles and caches that drown useful documents.
+// isNoisyFilePath 检测会淹没有用文档的应用包和缓存路径。
 func isNoisyFilePath(path string) bool {
 	normalized := strings.ToLower(filepath.ToSlash(filepath.Clean(path)))
 	for _, fragment := range skippedPathFragments {
@@ -502,7 +502,7 @@ func isNoisyFilePath(path string) bool {
 	return false
 }
 
-// StableFileID creates a stable local identifier from the absolute path.
+// StableFileID 根据绝对路径创建稳定的本地标识。
 func StableFileID(path string) string {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
@@ -513,7 +513,7 @@ func StableFileID(path string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// DefaultFileRoots returns the user's standard personal folders.
+// DefaultFileRoots 返回用户的标准个人文件夹。
 func DefaultFileRoots() []string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -533,7 +533,7 @@ func DefaultFileRoots() []string {
 	return roots
 }
 
-// String returns a compact diagnostic description.
+// String 返回紧凑的诊断描述。
 func (a *FileAdapter) String() string {
 	return fmt.Sprintf("file roots=%d", len(a.Roots))
 }
@@ -612,12 +612,12 @@ var skippedFileSuffixes = []string{
 	"~",
 }
 
-// ExtractFile extracts a single file into a DataItem; ok=false if skipped.
+// ExtractFile 将单个文件提取为 DataItem；如果被跳过则 ok=false。
 func (a *FileAdapter) ExtractFile(ctx context.Context, path string) (model.DataItem, bool) {
 	return a.extractFile(ctx, path, 0)
 }
 
-// ExtractChangedFile extracts a file if it is still changed relative to lastSyncTime.
+// ExtractChangedFile 在文件相对 lastSyncTime 仍有变化时提取它。
 func (a *FileAdapter) ExtractChangedFile(ctx context.Context, path string, lastSyncTime int64) (model.DataItem, bool) {
 	return a.extractFile(ctx, path, lastSyncTime)
 }
@@ -644,7 +644,7 @@ var skippedPathFragments = []string{
 	"/webcontent/",
 }
 
-// isWindowsSystemDir skips high-noise and permission-heavy Windows roots.
+// isWindowsSystemDir 跳过高噪声且权限负担重的 Windows 根目录。
 func isWindowsSystemDir(path string) bool {
 	cleaned := strings.ToLower(filepath.Clean(path))
 	volume := strings.ToLower(filepath.VolumeName(cleaned))

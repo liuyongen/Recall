@@ -11,8 +11,8 @@ import (
 	"recall/core/internal/model"
 )
 
-// StreamItemChunks cleans and chunks text from reader without materializing the
-// full item content. Chunks are yielded in ordinal order.
+// StreamItemChunks 从 reader 清理并切分文本，无需把完整条目内容物化到内存。
+// 分块会按序号顺序产出。
 func (i *Indexer) StreamItemChunks(
 	ctx context.Context,
 	item model.DataItem,

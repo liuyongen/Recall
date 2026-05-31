@@ -14,7 +14,7 @@ import (
 	"recall/core/internal/protocol"
 )
 
-// main starts the stdin/stdout JSON-line core server.
+// main 启动基于 stdin/stdout 的 JSON 行核心服务器。
 func main() {
 	logger := log.New(os.Stderr, "", log.LstdFlags|log.Lmicroseconds)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -34,7 +34,7 @@ func main() {
 	}
 }
 
-// registerHandlers maps JSON-RPC-style methods to core engine operations.
+// registerHandlers 将 JSON-RPC 风格的方法映射到核心引擎操作。
 func registerHandlers(server *protocol.Server, engine *core.Engine) {
 	server.Handle("health", func(ctx context.Context, raw json.RawMessage) (any, error) {
 		return engine.Health(ctx)

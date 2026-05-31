@@ -25,7 +25,7 @@ import (
 	"recall/core/internal/storage"
 )
 
-// Config contains runtime paths and extraction settings.
+// Config 包含运行时路径和提取设置。
 type Config struct {
 	DBPath   string
 	TikaURL  string
@@ -37,7 +37,7 @@ const (
 	fingerprintKindContent = "content:"
 )
 
-// Engine coordinates adapters, indexing, and search.
+// Engine 协调适配器、索引和搜索。
 type Engine struct {
 	store            *storage.Store
 	indexer          *indexer.Indexer
@@ -59,13 +59,13 @@ type Engine struct {
 	progress         model.IndexProgress
 	progressRunSeq   atomic.Uint64
 	activeProgressID atomic.Uint64
-	// lock-free counters updated during scanning; read back in IndexProgress.
+	// 扫描期间更新的无锁计数器；IndexProgress 会读取它们。
 	progressTotal   atomic.Int64
 	progressScanned atomic.Int64
 	progressIndexed atomic.Int64
 	progressSkipped atomic.Int64
 	progressWritten atomic.Int64
-	// file watching
+	// 文件监控
 	watcher     *fsnotify.Watcher
 	watchMu     sync.RWMutex
 	watchedDirs map[string]struct{}
@@ -73,7 +73,7 @@ type Engine struct {
 	cancel      context.CancelFunc
 }
 
-// DefaultConfig resolves local-only defaults from environment variables.
+// DefaultConfig 从环境变量解析仅本地使用的默认值。
 func DefaultConfig() Config {
 	return Config{
 		DBPath:   defaultDBPath(),
@@ -82,7 +82,7 @@ func DefaultConfig() Config {
 	}
 }
 
-// New constructs a local-first search engine.
+// New 构造本地优先的搜索引擎。
 func New(ctx context.Context, cfg Config) (*Engine, error) {
 	if cfg.MaxBytes <= 0 {
 		cfg.MaxBytes = extract.DefaultMaxBytes
@@ -117,7 +117,7 @@ func New(ctx context.Context, cfg Config) (*Engine, error) {
 		cancel:      cancel,
 	}
 
-	// Restore previously watched paths and perform incremental catch-up.
+	// 恢复此前监控的路径，并执行增量补齐。
 	if watchedPaths, watchErr := store.GetWatchedPaths(ctx); watchErr == nil {
 		for _, root := range watchedPaths {
 			if !isVolumeRoot(root) {
@@ -125,21 +125,20 @@ func New(ctx context.Context, cfg Config) (*Engine, error) {
 			}
 		}
 		if len(watchedPaths) > 0 {
-			// Delay catch-up so startup stays responsive and search can use existing index immediately.
+			// 延后补齐，让启动保持响应，并让搜索可以立即使用现有索引。
 			go engine.scheduleWatchedResync(watchedPaths)
 		}
 	}
 	go engine.watcherLoop()
 	go engine.periodicOptimize()
-	// Pre-warm the SQLite FTS5 page cache so the first user search hits
-	// in-memory pages rather than reading cold index segments from disk.
+	// 预热 SQLite FTS5 页缓存，让用户第一次搜索命中内存页，
+	// 而不是从磁盘读取冷索引段。
 	go store.WarmCache(engineCtx)
 
 	return engine, nil
 }
 
-// scheduleWatchedResync delays startup catch-up work to avoid competing with
-// initial searches right after launch.
+// scheduleWatchedResync 延后启动补齐任务，避免与刚启动后的初次搜索争抢资源。
 func (e *Engine) scheduleWatchedResync(roots []string) {
 	timer := time.NewTimer(1 * time.Second)
 	defer timer.Stop()
@@ -200,14 +199,14 @@ func (e *Engine) backfillContent(root string, maxBytes int64) {
 	}
 }
 
-// Close releases engine resources.
+// Close 释放引擎资源。
 func (e *Engine) Close() error {
 	e.cancel()
 	_ = e.watcher.Close()
 	return e.store.Close()
 }
 
-// Health returns operational metadata for the renderer.
+// Health 返回给渲染进程使用的运行元数据。
 func (e *Engine) Health(ctx context.Context) (map[string]any, error) {
 	version, err := e.store.SQLiteVersion(ctx)
 	if err != nil {
@@ -221,7 +220,7 @@ func (e *Engine) Health(ctx context.Context) (map[string]any, error) {
 	}, nil
 }
 
-// Search executes a bounded FTS5 search.
+// Search 执行有界 FTS5 搜索。
 func (e *Engine) Search(ctx context.Context, req model.SearchRequest) (model.SearchResponse, error) {
 	start := time.Now()
 	req.Query = strings.TrimSpace(req.Query)
@@ -251,7 +250,7 @@ func (e *Engine) Search(ctx context.Context, req model.SearchRequest) (model.Sea
 	}, nil
 }
 
-// CancelSearch cancels the active search request if one is running.
+// CancelSearch 取消正在运行的搜索请求。
 func (e *Engine) CancelSearch(ctx context.Context) (map[string]any, error) {
 	_ = ctx
 	e.runMu.Lock()
@@ -284,7 +283,7 @@ func (e *Engine) finishSearchRun(runID uint64, cancel context.CancelFunc) {
 	}
 }
 
-// IndexPath indexes a user-selected file or directory (incremental on repeat calls).
+// IndexPath 索引用户选择的文件或目录；重复调用时会增量处理。
 func (e *Engine) IndexPath(ctx context.Context, req model.IndexPathRequest) (model.SyncSummary, error) {
 	if strings.TrimSpace(req.Path) == "" {
 		return model.SyncSummary{}, fmt.Errorf("path is required")
@@ -320,7 +319,7 @@ func (e *Engine) IndexPath(ctx context.Context, req model.IndexPathRequest) (mod
 	return summary, err
 }
 
-// CancelIndexPath cancels the active index_path request if one is running.
+// CancelIndexPath 取消正在运行的 index_path 请求。
 func (e *Engine) CancelIndexPath(ctx context.Context) (map[string]any, error) {
 	_ = ctx
 	e.runMu.Lock()
@@ -343,8 +342,8 @@ func (e *Engine) cancelContentBackfill() {
 	}
 }
 
-// PauseContentIndex pauses the background full-text backfill at the next
-// cooperative checkpoint. Search and foreground file indexing remain usable.
+// PauseContentIndex 在下一个协作检查点暂停后台全文补齐。
+// 搜索和前台文件索引仍可使用。
 func (e *Engine) PauseContentIndex(ctx context.Context) (map[string]any, error) {
 	_ = ctx
 	e.contentPaused.Store(true)
@@ -357,7 +356,7 @@ func (e *Engine) PauseContentIndex(ctx context.Context) (map[string]any, error) 
 	return map[string]any{"ok": true, "paused": true}, nil
 }
 
-// ResumeContentIndex resumes a paused background full-text backfill.
+// ResumeContentIndex 恢复已暂停的后台全文补齐。
 func (e *Engine) ResumeContentIndex(ctx context.Context) (map[string]any, error) {
 	_ = ctx
 	e.contentPaused.Store(false)
@@ -370,7 +369,7 @@ func (e *Engine) ResumeContentIndex(ctx context.Context) (map[string]any, error)
 	return map[string]any{"ok": true, "paused": false}, nil
 }
 
-// SyncBrowsers indexes local browser history from supported profiles.
+// SyncBrowsers 索引受支持配置中的本地浏览器历史。
 func (e *Engine) SyncBrowsers(ctx context.Context) ([]model.SyncSummary, error) {
 	e.indexMu.Lock()
 	defer e.indexMu.Unlock()
@@ -402,7 +401,7 @@ func (e *Engine) SyncBrowsers(ctx context.Context) ([]model.SyncSummary, error) 
 	return summaries, nil
 }
 
-// CancelSyncBrowsers cancels the active sync_browsers request if one is running.
+// CancelSyncBrowsers 取消正在运行的 sync_browsers 请求。
 func (e *Engine) CancelSyncBrowsers(ctx context.Context) (map[string]any, error) {
 	_ = ctx
 	e.runMu.Lock()
@@ -415,7 +414,7 @@ func (e *Engine) CancelSyncBrowsers(ctx context.Context) (map[string]any, error)
 	return map[string]any{"ok": true, "canceled": true}, nil
 }
 
-// Optimize runs SQLite maintenance.
+// Optimize 执行 SQLite 维护。
 func (e *Engine) Optimize(ctx context.Context) (map[string]any, error) {
 	if err := e.store.Optimize(ctx); err != nil {
 		return nil, err
@@ -423,8 +422,8 @@ func (e *Engine) Optimize(ctx context.Context) (map[string]any, error) {
 	return map[string]any{"ok": true}, nil
 }
 
-// IndexProgress returns the latest live indexing status snapshot.
-// Counts are read from lock-free atomic counters; ETA is computed inline.
+// IndexProgress 返回最新的实时索引状态快照。
+// 计数从无锁原子计数器读取，ETA 会即时计算。
 func (e *Engine) IndexProgress(ctx context.Context) (model.IndexProgress, error) {
 	e.progressMu.RLock()
 	p := e.progress
@@ -451,7 +450,7 @@ func (e *Engine) IndexProgress(ctx context.Context) (model.IndexProgress, error)
 	return p, nil
 }
 
-// syncAdapter pulls incremental data from one adapter and indexes it.
+// syncAdapter 从一个适配器拉取增量数据并建立索引。
 func (e *Engine) syncAdapter(
 	ctx context.Context,
 	adapter model.DataAdapter,
@@ -516,8 +515,8 @@ func (e *Engine) syncAdapter(
 	return summary, nil
 }
 
-// syncFileAdapter streams file items directly into the indexer using batched
-// transactions to avoid the overhead of one commit per file.
+// syncFileAdapter 使用批量事务将文件条目流式送入索引器，
+// 避免每个文件提交一次的开销。
 func (e *Engine) syncFileAdapter(
 	ctx context.Context,
 	adapter *adapters.FileAdapter,
@@ -539,12 +538,9 @@ func (e *Engine) syncFileAdapter(
 		return summary, err
 	}
 
-	// BulkSession runs one writer goroutine per shard plus a dedicated
-	// main-DB writer. There is no per-batch barrier across shards, so the
-	// slowest shard never stalls the fast ones and the main-DB writer never
-	// blocks shard writers. This keeps sustained throughput high (target:
-	// 1000+ small files/sec) even after the index grows past tens of
-	// thousands of files.
+	// BulkSession 为每个分片运行一个写入协程。分片之间没有每批次屏障，
+	// 因而最慢的分片不会拖住更快的分片；文件指纹也随分块写入对应分片，
+	// 不再经过单独的主库写入器。这能在索引增长到数万文件后仍保持较高吞吐。
 	session := e.store.BeginBulk(ctx, func(written int) {
 		e.addProgressWritten(progressID, written)
 	})
@@ -571,7 +567,7 @@ func (e *Engine) syncFileAdapter(
 		known     bool
 	}
 
-	// Wider buffers smooth producer/consumer bursts when scanning huge volumes.
+	// 较宽的缓冲区可以平滑大规模扫描时的生产 / 消费突发。
 	paths := make(chan workItem, 1024)
 	prepared := make(chan preparedResult, 1024)
 	errCh := make(chan error, 1)
@@ -580,7 +576,7 @@ func (e *Engine) syncFileAdapter(
 
 	var workerWG sync.WaitGroup
 
-	// spawnWorker starts one extraction goroutine that reads from the shared paths channel.
+	// spawnWorker 启动一个提取协程，从共享 paths 通道读取任务。
 	spawnWorker := func() {
 		workerWG.Add(1)
 		go func() {
@@ -610,8 +606,7 @@ func (e *Engine) syncFileAdapter(
 				if !item.known {
 					entry.IsNew = true
 				}
-				// Pre-compute CJK bigrams off the writer thread for any
-				// chunks already materialised by the worker.
+				// 对工作线程已物化的分块，在写入线程外预计算 CJK 二元词。
 				for i := range entry.Chunks {
 					if entry.Chunks[i].CJKGrams == "" {
 						entry.Chunks[i].CJKGrams = storage.PrecomputeCJKGrams(entry.Chunks[i])
@@ -628,23 +623,22 @@ func (e *Engine) syncFileAdapter(
 		}()
 	}
 
-	// Start with the full worker pool immediately so throughput is maximised
-	// from the beginning. The index is CPU-bound (tokenisation + FTS5 writes)
-	// rather than purely IO-bound, so more workers help even on HDDs.
+	// 一开始就启用完整工作线程池，让吞吐从启动阶段就最大化。
+	// 索引过程受 CPU 限制（分词 + FTS5 写入），而不只是 IO 限制，
+	// 所以即使在 HDD 上更多工作线程也有帮助。
 	for i := 0; i < maxWorkers; i++ {
 		activeWorkers.Add(1)
 		spawnWorker()
 	}
 
-	// Adaptive scaling: after a warmup period measure files/sec and spawn
-	// additional workers if the disk appears to be SSD-class. HDDs top out at
-	// ~150 files/sec; SSDs typically exceed 500 files/sec for small text files.
-	// Only files actually sent to workers are counted (fast-skipped unchanged
-	// files are excluded so a re-index on HDD doesn't falsely trigger SSD mode).
+	// 自适应扩容：预热后测量文件/秒，如果磁盘表现接近 SSD，就增加工作线程。
+	// HDD 通常最高约 150 文件/秒；SSD 处理小文本文件通常超过 500 文件/秒。
+	// 只统计实际送到工作线程的文件，排除快速跳过的未变化文件，
+	// 避免 HDD 上重新索引时误触发 SSD 模式。
 	const (
 		warmupDuration = 10 * time.Second
-		ssdThreshold   = 300.0 // files/sec above which we assume SSD
-		ssdMaxWorkers  = 24    // cap for SSD burst scaling
+		ssdThreshold   = 300.0 // 超过该文件/秒就按 SSD 处理
+		ssdMaxWorkers  = 24    // SSD 突发扩容上限
 	)
 	go func() {
 		timer := time.NewTimer(warmupDuration)
@@ -654,25 +648,25 @@ func (e *Engine) syncFileAdapter(
 			return
 		case <-timer.C:
 		}
-		// Use progressIndexed+progressSkipped (worker-processed files) rather
-		// than progressScanned which includes fast-skipped unchanged files.
+		// 使用 progressIndexed+progressSkipped（工作线程处理过的文件），
+		// 而不是包含快速跳过未变化文件的 progressScanned。
 		processed := e.progressIndexed.Load() + e.progressSkipped.Load()
 		if processed == 0 {
 			return
 		}
 		fps := float64(processed) / warmupDuration.Seconds()
 		if fps < ssdThreshold {
-			return // HDD-like speed – current worker count is already optimal
+			return // HDD 类速度，当前工作线程数已经合适
 		}
-		// SSD detected – scale up beyond the default cap
+		// 检测到 SSD，扩容到默认上限之上
 		current := int(activeWorkers.Load())
 		toAdd := ssdMaxWorkers - current
 		for i := 0; i < toAdd; i++ {
 			activeWorkers.Add(1)
 			spawnWorker()
 		}
-		// Only update the worker count; do NOT call startProgress which would
-		// reset all counters and revert the phase back to "starting".
+		// 只更新工作线程数；不要调用 startProgress，
+		// 否则会重置所有计数并把阶段改回 "starting"。
 		e.progressMu.Lock()
 		if e.activeProgressID.Load() == progressID && e.progress.Active {
 			e.progress.Workers = int(activeWorkers.Load())
@@ -734,7 +728,7 @@ func (e *Engine) syncFileAdapter(
 		if err := session.Submit(result.entry); err != nil {
 			cancel()
 			_ = closeSession()
-			// Drain remaining prepared results to unblock workers.
+			// 排空剩余已准备结果，解除工作线程阻塞。
 			for range prepared {
 			}
 			<-errCh
@@ -761,10 +755,9 @@ func (e *Engine) syncFileAdapter(
 	skippedUnchanged := int(fastSkipped.Load())
 	summary.Scanned += skippedUnchanged
 	summary.Skipped += skippedUnchanged
-	// Bulk session Close runs the deferred FTS5 segment merge and WAL
-	// truncate on every shard. On large indexes this can take a few seconds
-	// after the last file is written — surface it so the UI doesn't appear
-	// frozen at 100%.
+	// 批量会话 Close 会等待分片写入器收尾，并恢复批量模式期间调整过的 SQLite 设置。
+	// 大索引上这仍可能在最后一个文件写完后花几秒；显式展示该阶段，
+	// 避免 UI 看起来卡在 100%。
 	e.setProgressPhase(progressID, "finalizing")
 	if err := closeSession(); err != nil {
 		e.finishProgress(progressID, summary, err)
@@ -825,13 +818,11 @@ func (e *Engine) prepareFileCandidate(
 
 	if extract.SupportsPlainText(candidate.Path) {
 		item := streamingFileItem(candidate, adapter.MaxBytes)
-		// For small/medium plain-text files do all the heavy work (file read,
-		// UTF-8 normalisation, chunking, hashing) right here in the worker so
-		// the writer's critical section only runs SQL. This converts the
-		// indexing pipeline from effectively single-threaded (everything
-		// behind the writer mutex) into N workers actually doing work in
-		// parallel. Large files fall through to the streaming path so we
-		// don't buffer hundreds of MB per worker.
+		// 对小 / 中型纯文本文件，在工作线程中完成重活
+		// （读文件、UTF-8 规范化、分块、哈希），让写入器临界区只执行 SQL。
+		// 这会把索引流水线从近似单线程（所有工作都卡在写入互斥锁之后）
+		// 变成 N 个工作线程真正并行工作。大文件则走流式路径，
+		// 避免每个工作线程缓冲数百 MB。
 		if candidate.Size <= 0 || candidate.Size > e.contentSizeLimit(adapter) {
 			if adapter.ContentOnly {
 				return storage.PreparedItem{}, model.DataItem{}, false
@@ -947,14 +938,13 @@ func (e *Engine) prepareFileCandidate(
 	}, item, true
 }
 
-// plainTextContentThreshold caps foreground full-content indexing. Larger text
-// files are indexed by filename/path first so whole-disk indexing keeps a
-// sustained files/sec rate instead of being dominated by tokenizing large blobs.
+// plainTextContentThreshold 限制前台完整内容索引大小。
+// 更大的文本文件会先按文件名 / 路径索引，让全盘索引保持稳定文件/秒，
+// 不被大型文本块的分词成本主导。
 const plainTextContentThreshold int64 = 64 * 1024
 
-// contentBackfillThreshold is larger because it runs after the fast pass in the
-// background. Files above this still keep their path index to avoid giant logs
-// or generated bundles monopolizing SQLite FTS writes.
+// contentBackfillThreshold 更大，因为它在快速路径之后于后台运行。
+// 超过该大小的文件仍保留路径索引，避免巨型日志或生成包垄断 SQLite FTS 写入。
 const contentBackfillThreshold int64 = 1024 * 1024
 
 func (e *Engine) contentSizeLimit(adapter *adapters.FileAdapter) int64 {
@@ -996,8 +986,8 @@ func (e *Engine) fingerprintKindForCandidate(adapter *adapters.FileAdapter, cand
 	return fingerprintKindPath
 }
 
-// eagerChunkPlainText reads a plain-text file fully in the calling worker and
-// returns the prepared chunks. Returns (nil, false) if the file cannot be read.
+// eagerChunkPlainText 在调用方工作线程中完整读取纯文本文件，并返回准备好的分块。
+// 如果文件无法读取，则返回 (nil, false)。
 func (e *Engine) eagerChunkPlainText(ctx context.Context, item model.DataItem) ([]model.Chunk, bool) {
 	if item.ContentSource == nil {
 		return nil, false
@@ -1009,8 +999,7 @@ func (e *Engine) eagerChunkPlainText(ctx context.Context, item model.DataItem) (
 	defer reader.Close()
 	chunks := make([]model.Chunk, 0, 4)
 	err = e.indexer.StreamItemChunks(ctx, item, reader, func(c model.Chunk) error {
-		// Pre-compute CJK bigrams off the writer thread so the writer's
-		// critical section only runs SQL.
+		// 在写入线程外预计算 CJK 二元词，让写入器临界区只执行 SQL。
 		c.CJKGrams = storage.PrecomputeCJKGrams(c)
 		chunks = append(chunks, c)
 		return nil
@@ -1355,8 +1344,8 @@ func (e *Engine) markProgressCanceled() {
 	e.progress.LastError = context.Canceled.Error()
 }
 
-// periodicOptimize merges FTS5 segments and updates query planner statistics
-// every 30 minutes to prevent search from slowing down as the index grows.
+// periodicOptimize 每 30 分钟合并 FTS5 段并更新查询规划器统计信息，
+// 防止搜索随着索引增长而变慢。
 func (e *Engine) periodicOptimize() {
 	ticker := time.NewTicker(30 * time.Minute)
 	defer ticker.Stop()
@@ -1382,13 +1371,13 @@ func (e *Engine) setSyncRunCancel(cancel context.CancelFunc) {
 	e.syncRunCancel = cancel
 }
 
-// enableWatch persists the path and registers it with the fsnotify watcher.
+// enableWatch 持久化路径，并注册到 fsnotify watcher。
 func (e *Engine) enableWatch(ctx context.Context, root string) {
 	_ = e.store.AddWatchedPath(ctx, root)
 	e.addToWatcher(root)
 }
 
-// addToWatcher recursively adds a file or directory tree to the fsnotify watcher.
+// addToWatcher 递归地将文件或目录树添加到 fsnotify watcher。
 func (e *Engine) addToWatcher(root string) {
 	info, err := os.Stat(root)
 	if err != nil {
@@ -1449,7 +1438,7 @@ func watchDirKey(path string) string {
 	return filepath.Clean(absolute)
 }
 
-// watcherLoop processes fsnotify events and keeps file indexes current.
+// watcherLoop 处理 fsnotify 事件，并保持文件索引最新。
 func (e *Engine) watcherLoop() {
 	pending := make(map[string]fsnotify.Op)
 	ticker := time.NewTicker(1 * time.Second)
@@ -1503,7 +1492,7 @@ func (e *Engine) removeIndexedPath(path string) {
 	e.unwatchSubtree(path)
 }
 
-// reindexChangedPath immediately re-indexes a changed file or new directory.
+// reindexChangedPath 立即重新索引变化文件或新目录。
 func (e *Engine) reindexChangedPath(path string) {
 	e.indexMu.Lock()
 	defer e.indexMu.Unlock()
@@ -1542,7 +1531,7 @@ func (e *Engine) reindexChangedPath(path string) {
 	_ = e.store.UpsertItems(e.ctx, []storage.PreparedItem{entry})
 }
 
-// resyncWatched performs incremental catch-up for all watched roots after engine restart.
+// resyncWatched 在引擎重启后对所有监控根路径执行增量补齐。
 func (e *Engine) resyncWatched(roots []string) {
 	e.indexMu.Lock()
 	defer e.indexMu.Unlock()
@@ -1565,7 +1554,7 @@ func (e *Engine) resyncWatched(roots []string) {
 		} else if volumeRoot {
 			e.scheduleContentBackfill(root, e.maxBytes)
 		}
-		// Stagger roots so catch-up stays gentle in the background.
+		// 错开根路径处理，让后台补齐更温和。
 		select {
 		case <-e.ctx.Done():
 			return
@@ -1574,7 +1563,7 @@ func (e *Engine) resyncWatched(roots []string) {
 	}
 }
 
-// pathSyncKey derives a stable per-path adapter key for sync_state.
+// pathSyncKey 为 sync_state 派生稳定的逐路径适配器 key。
 func pathSyncKey(path string) string {
 	sum := sha256.Sum256([]byte(strings.ToLower(filepath.Clean(path))))
 	return "file:" + hex.EncodeToString(sum[:8])
@@ -1609,7 +1598,7 @@ func defaultDBPath() string {
 	return filepath.Join(home, ".recall", "recall.db")
 }
 
-// makeSnippet centers a result preview around the first matched token.
+// makeSnippet 将结果预览居中到第一个匹配词附近。
 func makeSnippet(preview string, query string) string {
 	preview = strings.TrimSpace(preview)
 	if preview == "" {
@@ -1628,7 +1617,7 @@ func makeSnippet(preview string, query string) string {
 	return windowAround(preview, 0, 220)
 }
 
-// windowAround returns a bounded rune window around a byte index.
+// windowAround 返回某个字节索引附近的有界 rune 窗口。
 func windowAround(text string, byteIndex int, limit int) string {
 	runes := []rune(text)
 	if len(runes) <= limit {

@@ -8,14 +8,14 @@ import (
 	"recall/core/internal/storage"
 )
 
-// Indexer owns the text cleanup and chunking pipeline.
+// Indexer 负责文本清理和分块流水线。
 type Indexer struct {
 	store        *storage.Store
 	preprocessor *Preprocessor
 	chunker      *Chunker
 }
 
-// New creates an indexing pipeline backed by SQLite.
+// New 创建由 SQLite 支撑的索引流水线。
 func New(store *storage.Store) *Indexer {
 	return &Indexer{
 		store:        store,
@@ -24,7 +24,7 @@ func New(store *storage.Store) *Indexer {
 	}
 }
 
-// IndexItem cleans, chunks, and upserts one item.
+// IndexItem 清理、分块并写入或更新一个条目。
 func (i *Indexer) IndexItem(ctx context.Context, item model.DataItem) error {
 	item.Content = i.preprocessor.Clean(item.Content)
 	item.Preview = strings.TrimSpace(item.Preview)
@@ -37,8 +37,8 @@ func (i *Indexer) IndexItem(ctx context.Context, item model.DataItem) error {
 	return i.store.UpsertItem(ctx, item, i.chunker.Split(item))
 }
 
-// PrepareItem preprocesses and splits an item into chunks without writing to
-// the database. Returns nil chunks if the item has no indexable content.
+// PrepareItem 预处理并切分条目，但不写入数据库。
+// 如果条目没有可索引内容，则返回 nil 分块。
 func (i *Indexer) PrepareItem(item *model.DataItem) []model.Chunk {
 	item.Content = i.preprocessor.Clean(item.Content)
 	item.Preview = strings.TrimSpace(item.Preview)

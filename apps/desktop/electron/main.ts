@@ -36,15 +36,15 @@ function placeWindowLikeLauncher(win: BrowserWindow): void {
   win.setPosition(targetX, targetY);
 }
 
-/** Resolve a non-empty tray icon source for the current platform. */
+/** 为当前平台解析一个非空的托盘图标来源。 */
 function resolveTrayIcon(): NativeImage {
   const iconNames = process.platform === 'darwin'
     ? ['tray.png', 'icon.icns', 'icon.ico']
     : ['tray.ico', 'tray.png', 'icon.ico'];
 
-  // Prefer a dedicated multi-size tray icon, fall back to PNG/app icon.
-  // Avoid app.getFileIcon() — it wraps the icon with Windows shell decoration
-  // (opaque background) which produces a gray border in the system tray.
+  // 优先使用专用的多尺寸托盘图标，再回退到 PNG 或应用图标。
+  // 避免使用 app.getFileIcon()，它会给图标套上 Windows Shell 装饰
+  // （不透明背景），导致系统托盘里出现灰色边框。
   for (const name of iconNames) {
     const iconPath = path.resolve(app.getAppPath(), 'build', name);
     if (fs.existsSync(iconPath)) {
@@ -58,7 +58,7 @@ function resolveTrayIcon(): NativeImage {
   return nativeImage.createEmpty();
 }
 
-/** Creates the main search window. */
+/** 创建主搜索窗口。 */
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 760,
@@ -107,7 +107,7 @@ function setWindowHeight(height: number): void {
   mainWindow.setContentSize(width, targetHeight, true);
 }
 
-/** Shows the main window, creating it if necessary. */
+/** 显示主窗口；必要时先创建窗口。 */
 function showWindow(): void {
   if (!mainWindow || mainWindow.isDestroyed()) {
     createWindow();
@@ -118,7 +118,7 @@ function showWindow(): void {
   }
 }
 
-/** Hides the main window (keeps app alive in tray). */
+/** 隐藏主窗口，并让应用继续驻留托盘。 */
 function hideWindow(): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.hide();
@@ -142,12 +142,12 @@ function isCoreTimeoutError(error: unknown, method: string): boolean {
   return message.includes(`Core request timed out: ${method}`);
 }
 
-/** Registers app-level shortcuts and tray controls. */
+/** 注册应用级快捷键和托盘控制。 */
 async function registerShellControls(): Promise<void> {
-  // Ctrl+Space — wake up / show
+  // Ctrl+Space - 唤醒 / 显示
   globalShortcut.register('Control+Space', showWindow);
 
-  // Ctrl+W — hide to tray
+  // Ctrl+W - 隐藏到托盘
   globalShortcut.register('Control+W', hideWindow);
 
   try {
@@ -172,7 +172,7 @@ async function registerShellControls(): Promise<void> {
   }
 }
 
-/** Wires renderer IPC to the Go core child process. */
+/** 将渲染进程 IPC 接到 Go 核心子进程。 */
 function registerIpc(): void {
   ipcMain.handle('core:health', () => requestCore('health'));
   ipcMain.handle('core:search', (_event, params) => requestCore('search', params));
@@ -201,14 +201,12 @@ function registerIpc(): void {
   });
 }
 
-// Disable GPU shader disk cache to avoid access-denied errors when
-// the cache directory is locked by a previous process.
+// 禁用 GPU 着色器磁盘缓存，避免缓存目录被上一个进程锁住时出现拒绝访问错误。
 app.commandLine.appendSwitch('disable-gpu-shader-disk-cache');
 
-// Override userData to a stable "recall" folder regardless of the npm
-// package name. Must be set before app.whenReady() so every subsequent
-// call to app.getPath('userData') — including the core-client — uses
-// the correct path.
+// 无论 npm 包名是什么，都把 userData 覆盖为稳定的 "recall" 文件夹。
+// 必须在 app.whenReady() 之前设置，这样之后每次调用 app.getPath('userData')，
+// 包括 core-client 中的调用，都会使用正确路径。
 app.setPath('userData', path.join(app.getPath('appData'), 'recall'));
 
 app.whenReady().then(async () => {

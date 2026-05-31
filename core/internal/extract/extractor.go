@@ -12,45 +12,45 @@ import (
 	"github.com/google/go-tika/tika"
 )
 
-// Extractor extracts UTF-8 text and metadata from a local file.
+// Extractor 从本地文件提取 UTF-8 文本和元数据。
 type Extractor interface {
 	Extract(context.Context, string) (string, map[string]any, error)
 	Supports(string) bool
 }
 
-// Config controls local file extraction limits.
+// Config 控制本地文件提取限制。
 type Config struct {
 	MaxBytes int64
 	TikaURL  string
 }
 
-// DefaultMaxBytes is the default file size ceiling for indexing.
+// DefaultMaxBytes 是索引文件大小的默认上限。
 const DefaultMaxBytes int64 = 100 * 1024 * 1024
 
 var textExtensions = map[string]struct{}{
-	// Web / frontend
+	// Web / 前端
 	".astro": {}, ".css": {}, ".ejs": {}, ".elm": {}, ".graphql": {},
 	".gql": {}, ".htm": {}, ".html": {}, ".js": {}, ".jsx": {},
 	".less": {}, ".mdx": {}, ".pug": {}, ".sass": {}, ".scss": {},
 	".svelte": {}, ".ts": {}, ".tsx": {}, ".vue": {},
-	// Systems / compiled
+	// 系统 / 编译型
 	".c": {}, ".cc": {}, ".cpp": {}, ".cxx": {},
 	".h": {}, ".hpp": {}, ".hxx": {},
 	".cs": {}, ".fs": {}, ".fsx": {},
 	".go": {}, ".java": {}, ".kt": {}, ".kts": {},
 	".nim": {}, ".rs": {}, ".swift": {}, ".zig": {},
-	// Scripting / interpreted
+	// 脚本 / 解释型
 	".bash": {}, ".dart": {}, ".ex": {}, ".exs": {},
 	".jl": {}, ".lua": {}, ".php": {}, ".ps1": {},
 	".py": {}, ".r": {}, ".rb": {}, ".sh": {},
-	// JVM / functional
+	// JVM / 函数式
 	".clj": {}, ".cljs": {}, ".scala": {},
-	// Data / config / markup
+	// 数据 / 配置 / 标记
 	".cfg": {}, ".conf": {}, ".csv": {}, ".env": {},
 	".ini": {}, ".json": {}, ".md": {}, ".proto": {},
 	".sol": {}, ".sql": {}, ".tf": {}, ".toml": {},
 	".txt": {}, ".xml": {}, ".yaml": {}, ".yml": {},
-	// Schema / query
+	// 模式 / 查询
 	".prisma": {},
 }
 
@@ -58,7 +58,7 @@ var tikaExtensions = map[string]struct{}{
 	".docx": {}, ".pdf": {}, ".pptx": {}, ".rtf": {}, ".xlsx": {},
 }
 
-// SupportsIndexedPath reports whether a file extension is in the indexing whitelist.
+// SupportsIndexedPath 判断文件扩展名是否在索引白名单中。
 func SupportsIndexedPath(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	if _, ok := textExtensions[ext]; ok {
@@ -68,13 +68,13 @@ func SupportsIndexedPath(path string) bool {
 	return ok
 }
 
-// SupportsPlainText reports whether a file can be streamed as text directly.
+// SupportsPlainText 判断文件是否可以直接按文本流读取。
 func SupportsPlainText(path string) bool {
 	_, ok := textExtensions[strings.ToLower(filepath.Ext(path))]
 	return ok
 }
 
-// Default returns an extractor that reads plain text directly and uses local Tika when configured.
+// Default 返回一个提取器：直接读取纯文本，并在配置后使用本地 Tika。
 func Default(cfg Config) Extractor {
 	if cfg.MaxBytes <= 0 {
 		cfg.MaxBytes = DefaultMaxBytes
@@ -90,17 +90,17 @@ func Default(cfg Config) Extractor {
 	}
 }
 
-// PlainTextExtractor reads common text and code formats without external services.
+// PlainTextExtractor 无需外部服务即可读取常见文本和代码格式。
 type PlainTextExtractor struct {
 	MaxBytes int64
 }
 
-// Supports reports whether the file extension is a direct text format.
+// Supports 判断文件扩展名是否属于可直接读取的文本格式。
 func (e *PlainTextExtractor) Supports(path string) bool {
 	return SupportsPlainText(path)
 }
 
-// Extract reads a UTF-8-ish file into memory within the configured size limit.
+// Extract 在配置的大小限制内将近似 UTF-8 的文件读入内存。
 func (e *PlainTextExtractor) Extract(ctx context.Context, path string) (string, map[string]any, error) {
 	if !e.Supports(path) {
 		return "", nil, fmt.Errorf("unsupported text type: %s", filepath.Ext(path))
@@ -126,7 +126,7 @@ func (e *PlainTextExtractor) Extract(ctx context.Context, path string) (string, 
 	return text, fileMetadata(path, info), nil
 }
 
-// OpenPlainText opens a supported text file for streaming extraction.
+// OpenPlainText 打开受支持的文本文件，用于流式提取。
 func OpenPlainText(ctx context.Context, path string, maxBytes int64) (io.ReadCloser, map[string]any, os.FileInfo, error) {
 	if !SupportsPlainText(path) {
 		return nil, nil, nil, fmt.Errorf("unsupported text type: %s", filepath.Ext(path))
@@ -149,14 +149,14 @@ func OpenPlainText(ctx context.Context, path string, maxBytes int64) (io.ReadClo
 	return file, fileMetadata(path, info), info, nil
 }
 
-// TikaExtractor calls a user-managed local Apache Tika server for rich document formats.
+// TikaExtractor 调用用户自行管理的本地 Apache Tika 服务处理富文档格式。
 type TikaExtractor struct {
 	Client   *tika.Client
 	Fallback Extractor
 	MaxBytes int64
 }
 
-// Supports reports whether direct text or local Tika can handle the extension.
+// Supports 判断扩展名能否由直接文本读取或本地 Tika 处理。
 func (e *TikaExtractor) Supports(path string) bool {
 	if e.Fallback.Supports(path) {
 		return true
@@ -165,7 +165,7 @@ func (e *TikaExtractor) Supports(path string) bool {
 	return ok
 }
 
-// Extract parses rich documents through a local Tika server and text files directly.
+// Extract 通过本地 Tika 服务解析富文档，并直接读取文本文件。
 func (e *TikaExtractor) Extract(ctx context.Context, path string) (string, map[string]any, error) {
 	if e.Fallback.Supports(path) {
 		return e.Fallback.Extract(ctx, path)
@@ -195,7 +195,7 @@ func (e *TikaExtractor) Extract(ctx context.Context, path string) (string, map[s
 	return text, fileMetadata(path, info), nil
 }
 
-// fileMetadata returns normalized metadata for an extracted file.
+// fileMetadata 返回提取文件的规范化元数据。
 func fileMetadata(path string, info os.FileInfo) map[string]any {
 	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
 	return map[string]any{
@@ -206,7 +206,7 @@ func fileMetadata(path string, info os.FileInfo) map[string]any {
 	}
 }
 
-// readTextWithContext reads text in chunks to avoid holding both []byte and string copies.
+// readTextWithContext 分块读取文本，避免同时持有 []byte 和 string 副本。
 func readTextWithContext(ctx context.Context, reader io.Reader, size int64) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err

@@ -18,36 +18,34 @@ import (
 	"recall/core/internal/model"
 )
 
-// shardCount is the number of independent SQLite files used to store chunks
-// and FTS indexes. Each shard has its own writer connection and mutex so up
-// to N inserts run truly in parallel (SQLite only allows one writer per DB
-// file, but here we have N DB files).
+// shardCount 是用于存储分块和 FTS 索引的独立 SQLite 文件数量。
+// 每个分片都有自己的写连接和互斥锁，因此最多 N 路插入可以真正并行
+// （SQLite 每个数据库文件只允许一个写入器，但这里有 N 个数据库文件）。
 //
-// 8 shards give the bulk indexer enough independent SQLite writers to keep an
-// SSD busy. Search still fans out cheaply at this size, and this project is
-// new enough that we do not need to preserve older 4-shard layouts.
+// 8 个分片能给批量索引器足够多的独立 SQLite 写入器，让 SSD 保持忙碌。
+// 这个规模下搜索扇出成本仍然很低，而且项目足够新，无需兼容旧的 4 分片布局。
 const shardCount = 8
 
-// rowIDShardShift packs the shard index into the high byte of a 64-bit rowid
-// so callers (e.g. the React UI) can use a single integer as a stable key.
-// 56 bits is more than enough for billions of chunks per shard.
+// rowIDShardShift 将分片索引打包进 64 位 rowid 的高字节，
+// 让调用方（如 React UI）可以用单个整数作为稳定 key。
+// 56 位足以支撑每个分片数十亿个分块。
 const rowIDShardShift = 56
 const rowIDLocalMask = (int64(1) << rowIDShardShift) - 1
 
-// encodeGlobalRowID packs shard index and local rowid into one int64.
+// encodeGlobalRowID 将分片索引和本地 rowid 打包为一个 int64。
 func encodeGlobalRowID(shardIdx int, localRowID int64) int64 {
 	return (int64(shardIdx) << rowIDShardShift) | (localRowID & rowIDLocalMask)
 }
 
-// decodeGlobalRowID extracts the shard index and local rowid. Reserved for
-// future use (e.g. open-chunk-by-id features).
+// decodeGlobalRowID 提取分片索引和本地 rowid。
+// 保留给未来功能使用，例如按 id 打开分块。
 func decodeGlobalRowID(global int64) (int, int64) {
 	return int(global>>rowIDShardShift) & 0xFF, global & rowIDLocalMask
 }
 
 var _ = decodeGlobalRowID
 
-// pickShard returns the deterministic shard index for an item.
+// pickShard 返回条目的确定性分片索引。
 func pickShard(source, itemID string) int {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(source))
@@ -56,33 +54,31 @@ func pickShard(source, itemID string) int {
 	return int(h.Sum32() % shardCount)
 }
 
-// chunkShard owns one SQLite file containing chunks + FTS indexes.
+// chunkShard 拥有一个包含分块和 FTS 索引的 SQLite 文件。
 type chunkShard struct {
 	idx     int
 	path    string
 	db      *sql.DB
 	writeDB *sql.DB
 	writeMu sync.Mutex
-	// commitsSinceMaint counts how many write transactions have committed
-	// since the last incremental FTS merge / WAL checkpoint. Used to keep
-	// throughput steady on long indexing runs.
+	// commitsSinceMaint 记录自上次增量 FTS 合并 / WAL checkpoint 后
+	// 已提交的写事务数量，用于在长时间索引中维持稳定吞吐。
 	commitsSinceMaint int
-	// bulkMode disables all per-commit maintenance (FTS5 merge checks,
-	// WAL checkpoints). FTS5 segments accumulate freely, which keeps
-	// every commit O(1) regardless of index size. endBulkMode consolidates
-	// the segments and trims WAL once, eliminating the gradual slowdown
-	// caused by LSM-style automatic merges.
+	// bulkMode 会禁用逐提交维护（FTS5 增量合并、WAL checkpoint），
+	// 并关闭同步写盘，让批量导入阶段优先保证吞吐。
+	// endBulkMode 会恢复普通设置并做轻量 checkpoint；
+	// 重型 FTS 合并交给周期性或手动 Optimize，避免收尾阶段长时间阻塞。
 	bulkMode bool
 }
 
-// shardPath returns the on-disk path for shard N adjacent to the main DB.
+// shardPath 返回主库旁边第 N 个分片的磁盘路径。
 func shardPath(mainPath string, idx int) string {
 	dir := filepath.Dir(mainPath)
 	base := strings.TrimSuffix(filepath.Base(mainPath), filepath.Ext(mainPath))
 	return filepath.Join(dir, fmt.Sprintf("%s.shard-%d.db", base, idx))
 }
 
-// openShards opens (and migrates) all chunk shards alongside the main DB.
+// openShards 打开并迁移主库旁边的所有分块分片。
 func openShards(ctx context.Context, mainPath string) ([]*chunkShard, error) {
 	shards := make([]*chunkShard, 0, shardCount)
 	for i := 0; i < shardCount; i++ {
@@ -152,15 +148,12 @@ func (s *chunkShard) Close() error {
 }
 
 func (s *chunkShard) migrate(ctx context.Context) error {
-	// chunks deliberately has NO UNIQUE constraints. Earlier versions had
-	// `chunk_id UNIQUE` and `UNIQUE(source, item_id, ordinal)` but neither
-	// was ever queried — uniqueness was enforced by the application layer
-	// (loadChunks + diff). Each UNIQUE created a hidden b-tree that had to
-	// be probed and updated on every insert; once that b-tree no longer fit
-	// in SQLite's page cache, throughput collapsed as the index grew. Same
-	// reasoning applies to idx_chunks_source_time / idx_chunks_file_type:
-	// the query planner never picked them (FTS5 MATCH dominates), so they
-	// were pure write amplification.
+	// chunks 故意不加 UNIQUE 约束。旧版本有 `chunk_id UNIQUE` 和
+	// `UNIQUE(source, item_id, ordinal)`，但查询从未使用它们；
+	// 唯一性由应用层保证（loadChunks + diff）。每个 UNIQUE 都会创建隐藏 b-tree，
+	// 每次插入都要探测和更新；当这棵 b-tree 放不进 SQLite 页缓存后，
+	// 吞吐会随着索引增长而崩掉。idx_chunks_source_time / idx_chunks_file_type
+	// 也是同理：查询规划器从未选择它们（FTS5 MATCH 占主导），因此只是写放大。
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS chunks (
 			rowid INTEGER PRIMARY KEY,
@@ -179,9 +172,8 @@ func (s *chunkShard) migrate(ctx context.Context) error {
 			updated_at INTEGER NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_chunks_source_item ON chunks(source, item_id)`,
-		// file_fingerprints lives in the shard so each file's chunks +
-		// fingerprint commit together in a single transaction. The path is
-		// hashed into the same shard as the file's chunks via pickShard().
+		// file_fingerprints 放在分片里，让每个文件的分块和指纹在同一个事务中提交。
+		// 路径会通过 pickShard() 哈希到与该文件分块相同的分片。
 		`CREATE TABLE IF NOT EXISTS file_fingerprints (
 			path TEXT PRIMARY KEY,
 			size INTEGER NOT NULL,
@@ -200,10 +192,9 @@ func (s *chunkShard) migrate(ctx context.Context) error {
 			content='',
 			tokenize='unicode61 remove_diacritics 2'
 		)`,
-		// Set normal automerge for the steady-state (post-bulk) workload.
-		// During bulk indexing the BulkSession switches this to 0 so commits
-		// stay O(1) regardless of how big the index has grown; endBulkMode
-		// then forces a one-shot merge before restoring automerge here.
+		// 为稳定状态（批量之后）的工作负载设置普通 automerge。
+		// 批量索引期间 BulkSession 会把它切到 0，以减少写入时的合并成本；
+		// endBulkMode 随后恢复这里的 automerge。
 		`INSERT INTO chunk_fts(chunk_fts, rank) VALUES('automerge', 16)`,
 		`INSERT INTO ` + cjkLayeredFTSTable + `(` + cjkLayeredFTSTable + `, rank) VALUES('automerge', 16)`,
 	}
@@ -215,12 +206,9 @@ func (s *chunkShard) migrate(ctx context.Context) error {
 	return nil
 }
 
-// writeEntries persists every chunk for the given entries in one transaction.
-// In bulkMode the fast path uses multi-row INSERT statements which are much
-// faster than per-row inserts with modernc.org/sqlite. Changed existing items
-// are replaced wholesale instead of chunk-diffed; unchanged files are filtered
-// before this path by fingerprints, so the extra diff precision is not worth
-// the write amplification during high-rate indexing.
+// writeEntries 在一个事务中持久化给定条目的所有分块。
+// bulkMode 下，已物化条目使用多行 INSERT 语句，比 modernc.org/sqlite 的逐行插入快得多。
+// 非新条目会先删除旧分块再整体写入；带 ChunkSource 的流式条目仍走分块 diff。
 func (s *chunkShard) writeEntries(ctx context.Context, entries []PreparedItem) error {
 	if len(entries) == 0 {
 		return nil
@@ -247,8 +235,7 @@ func (s *chunkShard) writeEntries(ctx context.Context, entries []PreparedItem) e
 				hash, err := writeStreamingChunks(ctx, tx, entry)
 				if err != nil {
 					if errors.Is(err, ErrSkipItem) {
-						// Volatile file changed mid-read; ignore so the rest
-						// of the batch still commits.
+						// 易变文件在读取中途发生变化；忽略它，让批次其余部分仍可提交。
 						continue
 					}
 					return err
@@ -263,7 +250,7 @@ func (s *chunkShard) writeEntries(ctx context.Context, entries []PreparedItem) e
 				continue
 			}
 			if entry.IsNew {
-				// Defensive cleanup in case a previous run crashed mid-write.
+				// 防御性清理，处理上一次运行在写入中途崩溃的情况。
 				if err := deleteAllChunksForItem(ctx, tx, entry.Item.Source, entry.Item.ID); err != nil {
 					return err
 				}
@@ -334,11 +321,10 @@ func (s *chunkShard) writeBulkModeEntries(ctx context.Context, tx *sql.Tx, entri
 	return nil
 }
 
-// runWriteMaintenance keeps long indexing runs from slowing down by
-// occasionally trimming the WAL and feeding the FTS5 incremental merger
-// a small slice of work. Both operations are non-blocking for readers.
-// Must be called while holding writeMu. Skipped entirely while bulkMode
-// is active so high-rate ingestion stays at O(1) cost per commit.
+// runWriteMaintenance 通过偶尔截断 WAL，并给 FTS5 增量合并器喂一点工作，
+// 防止长时间索引逐渐变慢。这两个操作都不会阻塞读取器。
+// 必须在持有 writeMu 时调用。bulkMode 启用时会完全跳过，
+// 让高速摄入保持每次提交 O(1) 的成本。
 func (s *chunkShard) runWriteMaintenance(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
@@ -347,34 +333,30 @@ func (s *chunkShard) runWriteMaintenance(ctx context.Context) {
 		return
 	}
 	s.commitsSinceMaint++
-	// Every few commits, ask FTS5 to merge a bounded number of pages from
-	// its largest segment level. With automerge=16 segments accumulate
-	// freely between merges, so we drip-feed work here instead of letting
-	// a "crisis merge" stall a future commit.
+	// 每隔几次提交，请 FTS5 从最大段层级合并有限页数。
+	// automerge=16 时，段会在合并之间自由累积；这里渐进喂入工作，
+	// 避免未来某次提交被“危机合并”卡住。
 	if s.commitsSinceMaint%4 == 0 {
-		// Negative argument = incremental, page-bounded merge (FTS5 docs).
+		// 负参数表示增量、受页数限制的合并（FTS5 文档）。
 		_, _ = s.writeDB.ExecContext(ctx,
 			"INSERT INTO chunk_fts(chunk_fts, rank) VALUES('merge', -64)")
 		_, _ = s.writeDB.ExecContext(ctx,
 			"INSERT INTO "+cjkLayeredFTSTable+"("+cjkLayeredFTSTable+", rank) VALUES('merge', -64)")
 	}
-	// Trim WAL roughly every 16 commits. PASSIVE never blocks readers or
-	// other writers and silently no-ops if a reader still pins the WAL.
+	// 约每 16 次提交截断一次 WAL。PASSIVE 不会阻塞读取器或其他写入器；
+	// 如果仍有读取器固定 WAL，它会静默无操作。
 	if s.commitsSinceMaint >= 16 {
 		s.commitsSinceMaint = 0
 		_, _ = s.writeDB.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)")
 	}
 }
 
-// beginBulkMode disables FTS5 automatic segment merges, per-commit
-// maintenance, and fsync (synchronous=OFF) so high-rate ingestion stays
-// at constant cost. Must be paired with endBulkMode which restores normal
-// durability and consolidates the FTS5 segments accumulated during bulk.
+// beginBulkMode 禁用 FTS5 自动段合并、逐提交维护和 fsync（synchronous=OFF），
+// 让高速摄入优先保证吞吐。必须与 endBulkMode 配对使用，后者会恢复正常持久性。
 //
-// Safety: a crash during bulk indexing can corrupt a shard. That's
-// acceptable here because bulk runs are recoverable by re-indexing.
-// endBulkMode runs a TRUNCATE checkpoint that fsyncs everything before
-// returning, so once it completes the shard is durable.
+// 安全性：批量索引期间崩溃可能损坏分片。这里可以接受，因为批量运行可通过重建索引恢复。
+// endBulkMode 会先把 synchronous 恢复为 NORMAL，再执行 PASSIVE checkpoint；
+// 后续写入会回到普通 WAL 持久性策略。
 func (s *chunkShard) beginBulkMode(ctx context.Context) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -389,11 +371,9 @@ func (s *chunkShard) beginBulkMode(ctx context.Context) error {
 		"INSERT INTO "+cjkLayeredFTSTable+"("+cjkLayeredFTSTable+", rank) VALUES('automerge', 0)"); err != nil {
 		return err
 	}
-	// synchronous=OFF removes the fsync after every commit. On Windows
-	// each fsync is multi-millisecond; for a 50K file run this saves
-	// minutes. Combined with WAL it remains crash-safe for committed
-	// pages still in the WAL — only an OS-level crash mid-write can
-	// corrupt, and we resync after such a crash anyway.
+	// synchronous=OFF 移除每次提交后的 fsync。Windows 上每次 fsync 都是数毫秒级；
+	// 对 5 万文件的索引运行来说能节省数分钟。代价是批量阶段崩溃恢复能力变弱，
+	// 但该阶段可通过重新索引恢复。
 	if _, err := s.writeDB.ExecContext(ctx, "PRAGMA synchronous=OFF"); err != nil {
 		return err
 	}
@@ -401,10 +381,8 @@ func (s *chunkShard) beginBulkMode(ctx context.Context) error {
 	return nil
 }
 
-// endBulkMode re-enables automatic merging, forces one big merge to
-// consolidate all segments accumulated during bulk load, and truncates the
-// WAL. Returns after all maintenance commits land on disk so subsequent
-// reads see a tidy index. Safe to call when bulkMode is already false.
+// endBulkMode 重新启用自动合并，恢复 synchronous=NORMAL，并执行一次 PASSIVE checkpoint。
+// bulkMode 已经为 false 时调用也是安全的。
 func (s *chunkShard) endBulkMode(ctx context.Context) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -414,26 +392,23 @@ func (s *chunkShard) endBulkMode(ctx context.Context) error {
 	s.bulkMode = false
 	s.commitsSinceMaint = 0
 
-	// Restore durability before the post-bulk merge so any errors there
-	// land on disk with full fsync protection.
+	// 在批量后的合并前恢复持久性，确保后续任何错误都在完整 fsync 保护下落盘。
 	_, _ = s.writeDB.ExecContext(ctx, "PRAGMA synchronous=NORMAL")
 
-	// Restore normal automerge so future incremental writes self-maintain.
+	// 恢复普通 automerge，让未来增量写入可以自维护。
 	_, _ = s.writeDB.ExecContext(ctx,
 		"INSERT INTO chunk_fts(chunk_fts, rank) VALUES('automerge', 16)")
 	_, _ = s.writeDB.ExecContext(ctx,
 		"INSERT INTO "+cjkLayeredFTSTable+"("+cjkLayeredFTSTable+", rank) VALUES('automerge', 16)")
 
-	// Keep indexing completion fast. Heavy FTS consolidation is handled by
-	// periodic/manual Optimize; doing it synchronously here is exactly what
-	// makes long full-disk runs feel slower at the end.
+	// 保持索引完成阶段快速。这里只做 PASSIVE checkpoint；
+	// 重型 FTS 整理由周期性 / 手动 Optimize 处理。
 	_, _ = s.writeDB.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)")
 	return nil
 }
 
-// writeStreamingChunks consumes a ChunkSource and applies a diff against
-// existing chunks for the same item. The accumulated SHA-1 of chunk hashes
-// is returned so the main-DB fingerprint write can stamp the final value.
+// writeStreamingChunks 消费 ChunkSource，并与同一条目的既有分块做 diff。
+// 它返回分块哈希累积得到的 SHA-1，让文件指纹可以记录最终内容哈希。
 func writeStreamingChunks(ctx context.Context, tx *sql.Tx, entry PreparedItem) (string, error) {
 	oldChunks, err := loadChunks(ctx, tx, entry.Item.Source, entry.Item.ID)
 	if err != nil {
@@ -473,7 +448,7 @@ func writeStreamingChunks(ctx context.Context, tx *sql.Tx, entry PreparedItem) (
 }
 
 func deleteAllChunksForItem(ctx context.Context, tx *sql.Tx, source, itemID string) error {
-	// Look up existing chunk rowids so we can clean up their FTS entries.
+	// 查询既有分块 rowid，以便清理对应的 FTS 条目。
 	rows, err := tx.QueryContext(ctx, `
 SELECT rowid, chunk_id, item_id, source, title, content, preview, ordinal, hash,
        path, file_type, metadata_json, created_at, updated_at
@@ -571,8 +546,7 @@ func escapeLikePath(path string) string {
 	return b.String()
 }
 
-// searchShard runs an FTS query against this shard and returns candidates
-// with rowids already encoded with the shard index.
+// searchShard 在该分片上执行 FTS 查询，并返回已编码分片索引的候选 rowid。
 func (s *chunkShard) searchShard(
 	ctx context.Context,
 	req model.SearchRequest,
@@ -638,9 +612,8 @@ func (s *chunkShard) warmCache(ctx context.Context) {
 	}
 }
 
-// runShardsParallel invokes fn on each shard concurrently and returns the
-// first non-nil error encountered. Shards continue running even if one fails
-// so partial work is not silently lost in unrelated shards.
+// runShardsParallel 在每个分片上并发调用 fn，并返回遇到的首个非 nil 错误。
+// 即使某个分片失败，其他分片也会继续运行，避免无关分片的部分工作被静默丢失。
 func runShardsParallel(shards []*chunkShard, fn func(s *chunkShard) error) error {
 	if len(shards) == 0 {
 		return nil
@@ -663,7 +636,7 @@ func runShardsParallel(shards []*chunkShard, fn func(s *chunkShard) error) error
 	return nil
 }
 
-// applyPragmas applies the production SQLite pragmas to a connection pool.
+// applyPragmas 将生产环境 SQLite pragma 应用到连接池。
 func applyPragmas(ctx context.Context, db *sql.DB) error {
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL",

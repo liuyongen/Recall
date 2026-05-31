@@ -6,40 +6,40 @@ import (
 	"recall/core/internal/model"
 )
 
-// WeChatAdapter is a compliance-safe placeholder for user-provided exports.
+// WeChatAdapter 是面向用户自提供导出的合规安全占位适配器。
 type WeChatAdapter struct{}
 
-// NewWeChatAdapter creates the WeChat adapter placeholder.
+// NewWeChatAdapter 创建微信适配器占位实现。
 func NewWeChatAdapter() *WeChatAdapter {
 	return &WeChatAdapter{}
 }
 
-// ID returns the stable adapter identifier.
+// ID 返回稳定的适配器标识。
 func (a *WeChatAdapter) ID() string {
 	return "wechat"
 }
 
-// Name returns a human-readable adapter name.
+// Name 返回适合用户阅读的适配器名称。
 func (a *WeChatAdapter) Name() string {
 	return "WeChat"
 }
 
-// IsAvailable returns false until a user-authorized export importer is configured.
+// IsAvailable 在配置用户授权的导入器前始终返回 false。
 func (a *WeChatAdapter) IsAvailable() bool {
 	return false
 }
 
-// StartSync refuses memory key extraction and database circumvention.
+// StartSync 拒绝内存密钥提取和数据库绕过。
 func (a *WeChatAdapter) StartSync() error {
 	return fmt.Errorf("wechat memory scanning and encrypted database key extraction are not implemented")
 }
 
-// StopSync is a no-op for the placeholder.
+// StopSync 对占位实现无操作。
 func (a *WeChatAdapter) StopSync() error {
 	return nil
 }
 
-// GetIncrementalData refuses protected database extraction.
+// GetIncrementalData 拒绝提取受保护数据库。
 func (a *WeChatAdapter) GetIncrementalData(lastSyncTime int64) ([]model.DataItem, error) {
 	return nil, fmt.Errorf("wechat import requires a user-authorized export; protected database bypass is not supported")
 }

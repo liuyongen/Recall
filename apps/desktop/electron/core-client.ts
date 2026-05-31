@@ -28,7 +28,7 @@ let coreProcess: ChildProcessWithoutNullStreams | null = null;
 let nextID = 1;
 const pending = new Map<string, PendingRequest>();
 
-/** Returns the platform-specific core executable path. */
+/** 返回当前平台对应的核心可执行文件路径。 */
 export function getCorePath(): string {
   if (process.env.RECALL_CORE_PATH) {
     return process.env.RECALL_CORE_PATH;
@@ -42,7 +42,7 @@ export function getCorePath(): string {
   return path.resolve(app.getAppPath(), '..', '..', 'core', 'bin', exeName);
 }
 
-/** Starts the Go core process if it is not already running. */
+/** 如果 Go 核心进程尚未运行，则启动它。 */
 export function ensureCore(): ChildProcessWithoutNullStreams {
   if (coreProcess && !coreProcess.killed) {
     return coreProcess;
@@ -79,7 +79,7 @@ export function ensureCore(): ChildProcessWithoutNullStreams {
   return coreProcess;
 }
 
-/** Stops the Go core process and clears pending requests. */
+/** 停止 Go 核心进程并清理待处理请求。 */
 export async function stopCore(timeoutMs = 2500): Promise<void> {
   if (!coreProcess) {
     return;
@@ -92,7 +92,7 @@ export async function stopCore(timeoutMs = 2500): Promise<void> {
   try {
     child.stdin.end();
   } catch {
-    // The process may already be gone.
+    // 进程可能已经退出。
   }
 
   if (!child.killed) {
@@ -105,7 +105,7 @@ export async function stopCore(timeoutMs = 2500): Promise<void> {
   }
 }
 
-/** Sends a JSON-line request to the Go core and resolves with its result. */
+/** 向 Go 核心发送一条 JSON 行请求，并以结果完成 Promise。 */
 export function requestCore<T>(
   method: string,
   params: Record<string, unknown> = {},
@@ -193,9 +193,8 @@ function handleCoreLine(line: string): void {
 
   if (response.error) {
     if (isContextCanceled(response.error.message) && isCancelableMethod(request.method)) {
-      // Context cancellation is a normal outcome for interruptible operations.
-      // Resolve with a cancellation marker instead of rejecting so callers
-      // don't see spurious errors in the console.
+      // 对可中断操作来说，上下文取消是正常结果。
+      // 这里用取消标记完成 Promise，而不是 reject，避免调用方在控制台看到误报错误。
       request.resolve({ canceled: true });
       return;
     }
@@ -211,7 +210,7 @@ function isContextCanceled(message: string): boolean {
   return lower.includes('context canceled') || lower.includes('context cancelled');
 }
 
-/** Methods that support cancellation and should not surface context errors. */
+/** 支持取消、且不应向外暴露上下文错误的方法。 */
 function isCancelableMethod(method: string): boolean {
   return method === 'search' || method === 'index_path' || method === 'sync_browsers' || method === 'index_progress';
 }

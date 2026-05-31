@@ -12,13 +12,12 @@ import (
 	"recall/core/internal/model"
 )
 
-// TestIncrementalIndex verifies that a second IndexPath call only processes
-// files modified after the first call, and that the indexed count reflects
-// the incremental behavior.
+// TestIncrementalIndex 验证第二次 IndexPath 只处理首次调用后修改的文件，
+// 且 indexed 计数能反映增量行为。
 func TestIncrementalIndex(t *testing.T) {
 	dir := t.TempDir()
 
-	// Write first file before initial index.
+	// 初次索引前写入第一个文件。
 	writeFile(t, filepath.Join(dir, "a.txt"), "hello world incremental")
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
@@ -31,7 +30,7 @@ func TestIncrementalIndex(t *testing.T) {
 	}
 	defer eng.Close()
 
-	// First full index: should find a.txt.
+	// 第一次全量索引：应找到 a.txt。
 	summary1, err := eng.IndexPath(ctx, model.IndexPathRequest{Path: dir})
 	if err != nil {
 		t.Fatalf("IndexPath #1: %v", err)
@@ -41,7 +40,7 @@ func TestIncrementalIndex(t *testing.T) {
 	}
 	t.Logf("Pass 1: scanned=%d indexed=%d skipped=%d", summary1.Scanned, summary1.Indexed, summary1.Skipped)
 
-	// Second pass immediately: no new/changed files → nothing new indexed.
+	// 立即第二次执行：没有新增 / 变化文件，因此不会索引新内容。
 	summary2, err := eng.IndexPath(ctx, model.IndexPathRequest{Path: dir})
 	if err != nil {
 		t.Fatalf("IndexPath #2: %v", err)
@@ -51,7 +50,7 @@ func TestIncrementalIndex(t *testing.T) {
 	}
 	t.Logf("Pass 2 (incremental, no changes): scanned=%d indexed=%d", summary2.Scanned, summary2.Indexed)
 
-	// Add a new file and sleep 1s so its mtime is strictly after the stored sync time.
+	// 新增文件并等待 1 秒，确保 mtime 严格晚于已存同步时间。
 	time.Sleep(1100 * time.Millisecond)
 	writeFile(t, filepath.Join(dir, "b.txt"), "new file after first sync")
 
@@ -64,7 +63,7 @@ func TestIncrementalIndex(t *testing.T) {
 	}
 	t.Logf("Pass 3 (incremental, new file): scanned=%d indexed=%d", summary3.Scanned, summary3.Indexed)
 
-	// Verify both files are searchable.
+	// 验证两个文件都可搜索。
 	for _, query := range []string{"hello world", "new file after"} {
 		res, err := eng.Search(ctx, model.SearchRequest{Query: query, Limit: 5})
 		if err != nil {
@@ -77,12 +76,11 @@ func TestIncrementalIndex(t *testing.T) {
 	}
 }
 
-// TestAutoWatch verifies that file changes are automatically detected and
-// indexed without a manual IndexPath call.
+// TestAutoWatch 验证文件变化无需手动调用 IndexPath 也能被自动检测并索引。
 func TestAutoWatch(t *testing.T) {
 	dir := t.TempDir()
 
-	// Write initial file.
+	// 写入初始文件。
 	writeFile(t, filepath.Join(dir, "init.txt"), "initial content")
 
 	dbPath := filepath.Join(t.TempDir(), "watch.db")
@@ -95,25 +93,25 @@ func TestAutoWatch(t *testing.T) {
 	}
 	defer eng.Close()
 
-	// Index the directory — this also starts watching it.
+	// 索引目录，这也会开始监控该目录。
 	if _, err := eng.IndexPath(ctx, model.IndexPathRequest{Path: dir}); err != nil {
 		t.Fatalf("IndexPath: %v", err)
 	}
 
-	// Search for initial file.
+	// 搜索初始文件。
 	assertSearchHits(t, eng, ctx, "initial content", 1)
 
-	// Write a new file directly to the watched directory.
+	// 直接向受监控目录写入新文件。
 	writeFile(t, filepath.Join(dir, "auto.txt"), "auto watched file content")
 
-	// Wait for the watcher's debounce ticker (1s) + processing time.
+	// 等待 watcher 的防抖 ticker（1 秒）和处理时间。
 	time.Sleep(2500 * time.Millisecond)
 
-	// The new file should now be searchable without any manual IndexPath call.
+	// 不手动调用 IndexPath，新文件现在也应可搜索。
 	assertSearchHits(t, eng, ctx, "auto watched file content", 1)
 	t.Log("Auto-watch: new file detected and indexed automatically ✓")
 
-	// Modify the initial file.
+	// 修改初始文件。
 	writeFile(t, filepath.Join(dir, "init.txt"), "modified initial content")
 	time.Sleep(2500 * time.Millisecond)
 
@@ -176,7 +174,7 @@ func TestAutoWatchRemovesDeletedDirectoryTree(t *testing.T) {
 	assertSearchTotal(t, eng, ctx, "auto watch deleted directory content", 0)
 }
 
-// TestWatchPersistence verifies that watched paths survive an engine restart.
+// TestWatchPersistence 验证监控路径在引擎重启后仍会保留。
 func TestWatchPersistence(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(t.TempDir(), "persist.db")
@@ -185,7 +183,7 @@ func TestWatchPersistence(t *testing.T) {
 
 	ctx := context.Background()
 
-	// First engine instance: index and watch.
+	// 第一个引擎实例：索引并监控。
 	eng1, err := core.New(ctx, core.Config{DBPath: dbPath})
 	if err != nil {
 		t.Fatalf("engine1.New: %v", err)
@@ -195,18 +193,18 @@ func TestWatchPersistence(t *testing.T) {
 	}
 	eng1.Close()
 
-	// Add a file while engine is offline.
+	// 在引擎离线期间新增文件。
 	time.Sleep(100 * time.Millisecond)
 	writeFile(t, filepath.Join(dir, "second.txt"), "added while engine was offline")
 
-	// Second engine instance: should re-sync watched paths on startup.
+	// 第二个引擎实例：启动时应重新同步受监控路径。
 	eng2, err := core.New(ctx, core.Config{DBPath: dbPath})
 	if err != nil {
 		t.Fatalf("engine2.New: %v", err)
 	}
 	defer eng2.Close()
 
-	// Give background resync goroutine time to complete.
+	// 给后台重新同步 goroutine 留出完成时间。
 	time.Sleep(3 * time.Second)
 
 	assertSearchHits(t, eng2, ctx, "added while engine was offline", 1)
@@ -337,7 +335,7 @@ func TestSearchFolderAndFilename(t *testing.T) {
 	}
 }
 
-// helpers
+// 测试辅助函数
 
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()

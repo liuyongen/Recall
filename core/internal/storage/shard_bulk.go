@@ -10,26 +10,23 @@ import (
 	"recall/core/internal/model"
 )
 
-// bulkChunkCols is the column count of the chunks table insert below.
-// Keep in sync with bulkInsertChunks.
+// bulkChunkCols 是下方 chunks 表插入语句的列数。
+// 需要与 insertChunksBulk 保持同步。
 const bulkChunkCols = 13
 
-// bulkInsertEntries performs the absolute minimum SQL work for a batch of
-// brand-new items inside an open transaction:
-//   - One multi-row INSERT into chunks per ~500 chunk window.
-//   - One multi-row INSERT into chunk_fts per same window (with rowids
-//     captured from the chunks insert via SELECT max(rowid)).
-//   - One multi-row INSERT into cjk_layered_fts only for chunks whose
-//     CJKGrams string is non-empty.
-//   - One multi-row INSERT into file_fingerprints per ~500 row window.
+// bulkInsertEntries 在已打开的事务中为一批已物化条目执行尽量少的 SQL 工作：
+//   - 每约 500 个分块窗口，对 chunks 执行一次多行 INSERT。
+//   - 对同一窗口向 chunk_fts 执行一次多行 INSERT（rowid 根据
+//     chunks 插入返回的 LastInsertId 推出）。
+//   - 对有 CJK 内容的分块向 cjk_layered_fts 执行一次多行 INSERT。
+//   - 每约 800 行窗口，对 file_fingerprints 执行一次多行 INSERT。
 //
-// Multi-row inserts cut modernc.org/sqlite per-statement overhead from
-// thousands of parse/prepare cycles to a handful. Combined with bulk
-// mode (synchronous=OFF + automerge=0) this brings shard throughput up
-// to the levels the workers can actually feed.
+// 多行插入把 modernc.org/sqlite 的逐语句开销从数千次 parse/prepare
+// 降到少数几次。结合批量模式（synchronous=OFF + automerge=0），
+// 分片吞吐可以提升到工作线程实际能供给的水平。
 func bulkInsertEntries(ctx context.Context, tx *sql.Tx, entries []PreparedItem) error {
-	// 1. Gather and persist chunks; capture starting rowid so the matching
-	//    FTS rows can reference rowid=startRowID+offset without round-trips.
+	// 1. 收集并持久化分块；推导起始 rowid，
+	//    这样对应 FTS 行可直接引用 rowid=startRowID+offset，无需逐行查询。
 	type rowMeta struct {
 		startRow int64
 		chunks   []model.Chunk
@@ -46,8 +43,8 @@ func bulkInsertEntries(ctx context.Context, tx *sql.Tx, entries []PreparedItem) 
 	}
 
 	if len(allChunks) > 0 {
-		// modernc default SQLITE_LIMIT_VARIABLE_NUMBER ~32k; 500 rows * 13
-		// cols = 6500 params per statement leaves plenty of headroom.
+		// modernc 默认 SQLITE_LIMIT_VARIABLE_NUMBER 约为 32k；
+		// 500 行 * 13 列 = 每条语句 6500 个参数，余量充足。
 		const maxRows = 500
 		for start := 0; start < len(allChunks); start += maxRows {
 			end := start + maxRows
@@ -69,7 +66,7 @@ func bulkInsertEntries(ctx context.Context, tx *sql.Tx, entries []PreparedItem) 
 		}
 	}
 
-	// 2. Persist fingerprints (one per file, not per chunk).
+	// 2. 持久化指纹（每个文件一个，而不是每个分块一个）。
 	fps := make([]FileFingerprint, 0, len(entries))
 	for _, e := range entries {
 		if e.Fingerprint == nil || e.Fingerprint.Path == "" {
@@ -124,8 +121,8 @@ ordinal, hash, path, file_type, metadata_json, created_at, updated_at) VALUES `)
 	if err != nil {
 		return 0, err
 	}
-	// AUTOINCREMENT assigns sequential rowids per statement, so the first
-	// rowid in this batch is last - (len-1).
+	// SQLite 会在这条多行 INSERT 中分配连续 rowid，
+	// 因此本批次首个 rowid 是 last - (len-1)。
 	return last - int64(len(chunks)-1), nil
 }
 
@@ -157,7 +154,7 @@ func insertCJKBulk(ctx context.Context, tx *sql.Tx, m struct {
 	startRow int64
 	chunks   []model.Chunk
 }) error {
-	// Collect only non-empty bigrams so the FTS5 index stays compact.
+	// 只写入有 CJK 二元词的行，保持 FTS5 索引紧凑。
 	type row struct {
 		rowID int64
 		grams string
@@ -223,8 +220,8 @@ func insertFingerprintsBulk(ctx context.Context, tx *sql.Tx, fps []FileFingerpri
 	return nil
 }
 
-// upsertFingerprintTx writes a single fingerprint inside an open transaction.
-// Used by the non-bulk (diff / streaming) paths.
+// upsertFingerprintTx 在已打开的事务中写入单个指纹。
+// 用于非批量（差异 / 流式）路径。
 func upsertFingerprintTx(ctx context.Context, tx *sql.Tx, fp FileFingerprint) error {
 	if fp.Path == "" {
 		return nil

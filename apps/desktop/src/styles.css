@@ -23,7 +23,7 @@ input {
   font: inherit;
 }
 
-/* Layout */
+/* 布局 */
 
 .shell {
   display: grid;
@@ -37,14 +37,14 @@ input {
   height: 100vh;
 }
 
-/* Drag bar */
+/* 拖拽栏 */
 
 .dragbar {
   height: 10px;
   -webkit-app-region: drag;
 }
 
-/* Search band */
+/* 搜索区 */
 
 .searchBand {
   padding: 0 18px 10px;
@@ -85,7 +85,7 @@ input {
   color: #ccc;
 }
 
-/* Icon buttons */
+/* 图标按钮 */
 
 .iconButton {
   display: inline-grid;
@@ -123,7 +123,7 @@ input {
   color: inherit;
 }
 
-/* Filter row */
+/* 过滤行 */
 
 .recallMeta {
   display: flex;
@@ -315,7 +315,7 @@ input {
   color: #c0392b;
 }
 
-/* Results */
+/* 结果 */
 
 .results {
   overflow: auto;
@@ -381,7 +381,7 @@ input {
   color: #475a75;
 }
 
-/* Result internals */
+/* 结果内部元素 */
 
 .resultTop {
   display: grid;
@@ -481,7 +481,7 @@ input {
   text-decoration: underline;
 }
 
-/* Empty states */
+/* 空状态 */
 
 .memoryBlank {
   display: grid;
@@ -589,7 +589,7 @@ input {
   }
 }
 
-/* Dark mode */
+/* 深色模式 */
 
 @media (prefers-color-scheme: dark) {
   :root {

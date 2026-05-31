@@ -17,39 +17,39 @@ import (
 	"recall/core/internal/model"
 )
 
-// BrowserKind identifies a supported local browser profile.
+// BrowserKind 标识受支持的本地浏览器配置。
 type BrowserKind string
 
 const (
-	// BrowserChrome is Google Chrome.
+	// BrowserChrome 表示 Google Chrome。
 	BrowserChrome BrowserKind = "chrome"
-	// BrowserEdge is Microsoft Edge.
+	// BrowserEdge 表示 Microsoft Edge。
 	BrowserEdge BrowserKind = "edge"
-	// BrowserFirefox is Mozilla Firefox.
+	// BrowserFirefox 表示 Mozilla Firefox。
 	BrowserFirefox BrowserKind = "firefox"
 )
 
-// BrowserAdapter reads local history and bookmarks from browser profile files.
+// BrowserAdapter 从浏览器配置文件读取本地历史和书签。
 type BrowserAdapter struct {
 	Kind BrowserKind
 }
 
-// NewBrowserAdapter creates a browser adapter for one browser family.
+// NewBrowserAdapter 为一个浏览器系列创建适配器。
 func NewBrowserAdapter(kind BrowserKind) *BrowserAdapter {
 	return &BrowserAdapter{Kind: kind}
 }
 
-// ID returns the stable adapter identifier.
+// ID 返回稳定的适配器标识。
 func (a *BrowserAdapter) ID() string {
 	return "browser." + string(a.Kind)
 }
 
-// Name returns a human-readable adapter name.
+// Name 返回适合用户阅读的适配器名称。
 func (a *BrowserAdapter) Name() string {
 	return titleCaseASCII(string(a.Kind)) + " History"
 }
 
-// IsAvailable reports whether the browser profile data exists locally.
+// IsAvailable 判断本地是否存在浏览器配置数据。
 func (a *BrowserAdapter) IsAvailable() bool {
 	for _, path := range a.historyPaths() {
 		if _, err := os.Stat(path); err == nil {
@@ -59,17 +59,17 @@ func (a *BrowserAdapter) IsAvailable() bool {
 	return false
 }
 
-// StartSync is a no-op because browser files are polled incrementally.
+// StartSync 无操作，因为浏览器文件通过增量轮询读取。
 func (a *BrowserAdapter) StartSync() error {
 	return nil
 }
 
-// StopSync is a no-op because browser files are polled incrementally.
+// StopSync 无操作，因为浏览器文件通过增量轮询读取。
 func (a *BrowserAdapter) StopSync() error {
 	return nil
 }
 
-// GetIncrementalData reads history rows changed after lastSyncTime.
+// GetIncrementalData 读取 lastSyncTime 之后变化的历史记录行。
 func (a *BrowserAdapter) GetIncrementalData(lastSyncTime int64) ([]model.DataItem, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -91,7 +91,7 @@ func (a *BrowserAdapter) GetIncrementalData(lastSyncTime int64) ([]model.DataIte
 	return items, nil
 }
 
-// readHistory copies a locked browser database and extracts local rows.
+// readHistory 复制被锁定的浏览器数据库，并提取本地记录行。
 func (a *BrowserAdapter) readHistory(
 	ctx context.Context,
 	historyPath string,
@@ -123,7 +123,7 @@ func (a *BrowserAdapter) readHistory(
 	return history, nil
 }
 
-// readChromium reads Chromium URL history from the copied History database.
+// readChromium 从复制出的 History 数据库读取 Chromium URL 历史。
 func (a *BrowserAdapter) readChromium(
 	ctx context.Context,
 	db *sql.DB,
@@ -151,7 +151,7 @@ LIMIT 5000`, unixToChromeTime(lastSyncTime))
 	return items, rows.Err()
 }
 
-// readFirefox reads Firefox history and bookmarks from places.sqlite.
+// readFirefox 从 places.sqlite 读取 Firefox 历史和书签。
 func (a *BrowserAdapter) readFirefox(
 	ctx context.Context,
 	db *sql.DB,
@@ -186,7 +186,7 @@ LIMIT 5000`, lastSyncTime*1_000_000)
 	return items, nil
 }
 
-// readChromiumDownloads reads Chromium download metadata.
+// readChromiumDownloads 读取 Chromium 下载元数据。
 func (a *BrowserAdapter) readChromiumDownloads(
 	ctx context.Context,
 	db *sql.DB,
@@ -214,7 +214,7 @@ LIMIT 2000`, unixToChromeTime(lastSyncTime))
 	return items, rows.Err()
 }
 
-// readFirefoxBookmarks reads Firefox bookmark rows.
+// readFirefoxBookmarks 读取 Firefox 书签行。
 func (a *BrowserAdapter) readFirefoxBookmarks(
 	ctx context.Context,
 	db *sql.DB,
@@ -243,7 +243,7 @@ LIMIT 5000`, lastSyncTime*1_000_000)
 	return items, rows.Err()
 }
 
-// scanChromiumRow converts one Chromium history row into a DataItem.
+// scanChromiumRow 将一行 Chromium 历史转换为 DataItem。
 func scanChromiumRow(rows *sql.Rows, source string) (model.DataItem, error) {
 	var url, title string
 	var chromeTime, visits int64
@@ -254,7 +254,7 @@ func scanChromiumRow(rows *sql.Rows, source string) (model.DataItem, error) {
 	return browserItem(source, url, title, visits, updated), nil
 }
 
-// scanFirefoxRow converts one Firefox history row into a DataItem.
+// scanFirefoxRow 将一行 Firefox 历史转换为 DataItem。
 func scanFirefoxRow(rows *sql.Rows) (model.DataItem, error) {
 	var url string
 	var title sql.NullString
@@ -267,7 +267,7 @@ func scanFirefoxRow(rows *sql.Rows) (model.DataItem, error) {
 	return browserItem("firefox", url, title.String, visits.Int64, updated), nil
 }
 
-// scanChromiumDownload converts one Chromium download row into a DataItem.
+// scanChromiumDownload 将一行 Chromium 下载转换为 DataItem。
 func scanChromiumDownload(rows *sql.Rows, source string) (model.DataItem, error) {
 	var targetPath, tabURL sql.NullString
 	var chromeTime, receivedBytes, totalBytes int64
@@ -295,7 +295,7 @@ func scanChromiumDownload(rows *sql.Rows, source string) (model.DataItem, error)
 	}, nil
 }
 
-// scanFirefoxBookmark converts one Firefox bookmark row into a DataItem.
+// scanFirefoxBookmark 将一行 Firefox 书签转换为 DataItem。
 func scanFirefoxBookmark(rows *sql.Rows) (model.DataItem, error) {
 	var url, title string
 	var added int64
@@ -305,7 +305,7 @@ func scanFirefoxBookmark(rows *sql.Rows) (model.DataItem, error) {
 	return bookmarkItem("firefox", url, title, added/1_000_000), nil
 }
 
-// browserItem builds a normalized history item.
+// browserItem 构造标准化历史条目。
 func browserItem(source string, url string, title string, visits int64, updated int64) model.DataItem {
 	if strings.TrimSpace(title) == "" {
 		title = url
@@ -326,7 +326,7 @@ func browserItem(source string, url string, title string, visits int64, updated 
 	}
 }
 
-// bookmarkItem builds a normalized bookmark item.
+// bookmarkItem 构造标准化书签条目。
 func bookmarkItem(source string, url string, title string, updated int64) model.DataItem {
 	if strings.TrimSpace(title) == "" {
 		title = url
@@ -344,7 +344,7 @@ func bookmarkItem(source string, url string, title string, updated int64) model.
 	}
 }
 
-// historyPaths returns browser history database locations.
+// historyPaths 返回浏览器历史数据库位置。
 func (a *BrowserAdapter) historyPaths() []string {
 	if runtime.GOOS != "windows" {
 		return nil
@@ -363,7 +363,7 @@ func (a *BrowserAdapter) historyPaths() []string {
 	}
 }
 
-// bookmarkPaths returns Chromium bookmark JSON locations.
+// bookmarkPaths 返回 Chromium 书签 JSON 位置。
 func (a *BrowserAdapter) bookmarkPaths() []string {
 	if runtime.GOOS != "windows" {
 		return nil
@@ -379,7 +379,7 @@ func (a *BrowserAdapter) bookmarkPaths() []string {
 	}
 }
 
-// firefoxProfiles returns Firefox profile database locations.
+// firefoxProfiles 返回 Firefox 配置数据库位置。
 func firefoxProfiles(roaming string) []string {
 	root := filepath.Join(roaming, "Mozilla", "Firefox", "Profiles")
 	entries, err := os.ReadDir(root)
@@ -395,7 +395,7 @@ func firefoxProfiles(roaming string) []string {
 	return paths
 }
 
-// copyLockedDB copies a live browser database to a temporary read-only file.
+// copyLockedDB 将正在使用的浏览器数据库复制为临时只读文件。
 func copyLockedDB(path string) (string, func(), error) {
 	source, err := os.Open(path)
 	if err != nil {
@@ -416,7 +416,7 @@ func copyLockedDB(path string) (string, func(), error) {
 	return target.Name(), func() { _ = os.Remove(target.Name()) }, nil
 }
 
-// chromeTimeToUnix converts Chromium WebKit timestamps to Unix seconds.
+// chromeTimeToUnix 将 Chromium WebKit 时间戳转换为 Unix 秒。
 func chromeTimeToUnix(value int64) int64 {
 	if value <= 0 {
 		return 0
@@ -424,7 +424,7 @@ func chromeTimeToUnix(value int64) int64 {
 	return (value / 1_000_000) - 11644473600
 }
 
-// unixToChromeTime converts Unix seconds to Chromium WebKit timestamps.
+// unixToChromeTime 将 Unix 秒转换为 Chromium WebKit 时间戳。
 func unixToChromeTime(value int64) int64 {
 	if value <= 0 {
 		return 0
@@ -432,14 +432,14 @@ func unixToChromeTime(value int64) int64 {
 	return (value + 11644473600) * 1_000_000
 }
 
-// BrowserBookmark is a normalized bookmark node for future bookmark indexing.
+// BrowserBookmark 是用于书签索引的标准化书签节点。
 type BrowserBookmark struct {
 	Name string `json:"name"`
 	URL  string `json:"url"`
 	Date int64  `json:"date"`
 }
 
-// readBookmarks reads a Chromium bookmark JSON file.
+// readBookmarks 读取 Chromium 书签 JSON 文件。
 func (a *BrowserAdapter) readBookmarks(path string, lastSyncTime int64) ([]model.DataItem, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -460,7 +460,7 @@ func (a *BrowserAdapter) readBookmarks(path string, lastSyncTime int64) ([]model
 	return items, nil
 }
 
-// decodeBookmarks flattens Chromium bookmark JSON roots.
+// decodeBookmarks 展平 Chromium 书签 JSON 根节点。
 func decodeBookmarks(data []byte) ([]BrowserBookmark, error) {
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -478,7 +478,7 @@ func decodeBookmarks(data []byte) ([]BrowserBookmark, error) {
 	return bookmarks, nil
 }
 
-// collectBookmarks recursively visits Chromium bookmark nodes.
+// collectBookmarks 递归访问 Chromium 书签节点。
 func collectBookmarks(node any, bookmarks *[]BrowserBookmark) {
 	value, ok := node.(map[string]any)
 	if !ok {
@@ -498,7 +498,7 @@ func collectBookmarks(node any, bookmarks *[]BrowserBookmark) {
 	}
 }
 
-// parseChromeTimestamp parses a Chromium timestamp from JSON.
+// parseChromeTimestamp 从 JSON 解析 Chromium 时间戳。
 func parseChromeTimestamp(value any) (int64, bool) {
 	switch typed := value.(type) {
 	case string:
@@ -512,7 +512,7 @@ func parseChromeTimestamp(value any) (int64, bool) {
 	return 0, false
 }
 
-// titleCaseASCII uppercases the first ASCII character.
+// titleCaseASCII 将第一个 ASCII 字符转为大写。
 func titleCaseASCII(value string) string {
 	if value == "" {
 		return value

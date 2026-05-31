@@ -12,10 +12,10 @@ import (
 	"time"
 )
 
-// Handler processes one request payload and returns a JSON-serializable value.
+// Handler 处理一个请求载荷，并返回可 JSON 序列化的值。
 type Handler func(context.Context, json.RawMessage) (any, error)
 
-// Server reads request lines from stdin and writes response lines to stdout.
+// Server 从 stdin 读取请求行，并向 stdout 写入响应行。
 type Server struct {
 	in       io.Reader
 	out      io.Writer
@@ -44,7 +44,7 @@ type wireError struct {
 	Message string `json:"message"`
 }
 
-// NewServer constructs a protocol server.
+// NewServer 构造一个协议服务器。
 func NewServer(in io.Reader, out io.Writer, logger *log.Logger) *Server {
 	return &Server{
 		in:       in,
@@ -55,12 +55,12 @@ func NewServer(in io.Reader, out io.Writer, logger *log.Logger) *Server {
 	}
 }
 
-// Handle registers a method handler.
+// Handle 注册一个方法处理器。
 func (s *Server) Handle(method string, handler Handler) {
 	s.handlers[method] = handler
 }
 
-// Serve blocks until the input stream closes or the context is canceled.
+// Serve 会阻塞，直到输入流关闭或上下文被取消。
 func (s *Server) Serve(ctx context.Context) error {
 	scanner := bufio.NewScanner(s.in)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
@@ -82,7 +82,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// handleLine decodes and dispatches one request line.
+// handleLine 解码并分发一行请求。
 func (s *Server) handleLine(parent context.Context, line []byte) {
 	var req request
 	if err := json.Unmarshal(line, &req); err != nil {
@@ -117,7 +117,7 @@ func (s *Server) handleLine(parent context.Context, line []byte) {
 	s.write(req.ID, result, err)
 }
 
-// write serializes one response while preserving line ordering.
+// write 序列化一条响应，同时保持行顺序。
 func (s *Server) write(id string, result any, err error) {
 	msg := response{Type: "response", ID: id, Result: result}
 	if err != nil {
@@ -133,7 +133,7 @@ func (s *Server) write(id string, result any, err error) {
 	}
 }
 
-// timeoutFor returns the hard request deadline for a method.
+// timeoutFor 返回某个方法的硬性请求截止时间。
 func timeoutFor(method string) time.Duration {
 	switch method {
 	case "search":

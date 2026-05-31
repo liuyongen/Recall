@@ -9,19 +9,19 @@ import (
 
 var tagPattern = regexp.MustCompile(`<[^>]+>`)
 
-// Preprocessor normalizes extracted text before indexing.
+// Preprocessor 在索引前规范化提取出的文本。
 type Preprocessor struct {
 	builderPool sync.Pool
 }
 
-// NewPreprocessor creates a reusable text preprocessor.
+// NewPreprocessor 创建可复用的文本预处理器。
 func NewPreprocessor() *Preprocessor {
 	return &Preprocessor{
 		builderPool: sync.Pool{New: func() any { return new(strings.Builder) }},
 	}
 }
 
-// Clean removes markup, control characters, and repeated whitespace.
+// Clean 移除标记、控制字符和重复空白。
 func (p *Preprocessor) Clean(input string) string {
 	if input == "" {
 		return ""
@@ -52,7 +52,7 @@ func (p *Preprocessor) Clean(input string) string {
 	return strings.TrimSpace(builder.String())
 }
 
-// normalizeRune removes control characters and standardizes whitespace.
+// normalizeRune 移除控制字符并统一空白字符。
 func normalizeRune(r rune) rune {
 	switch {
 	case r == '\n' || r == '\r' || r == '\t':
