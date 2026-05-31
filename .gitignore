@@ -4,6 +4,7 @@ dist-electron/
 apps/desktop/dist/
 apps/desktop/dist-electron/
 apps/desktop/release/
+apps/desktop/release-icon-check/
 core/bin/
 *.db
 *.db-shm

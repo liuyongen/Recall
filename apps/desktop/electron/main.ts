@@ -38,14 +38,14 @@ function placeWindowLikeLauncher(win: BrowserWindow): void {
 
 /** Resolve a non-empty tray icon source for the current platform. */
 function resolveTrayIcon(): NativeImage {
-  if (process.platform !== 'win32') {
-    return nativeImage.createEmpty();
-  }
+  const iconNames = process.platform === 'darwin'
+    ? ['tray.png', 'icon.icns', 'icon.ico']
+    : ['tray.ico', 'tray.png', 'icon.ico'];
 
-  // Prefer a dedicated transparent multi-size tray icon, fall back to PNG/app ICO.
+  // Prefer a dedicated multi-size tray icon, fall back to PNG/app icon.
   // Avoid app.getFileIcon() — it wraps the icon with Windows shell decoration
   // (opaque background) which produces a gray border in the system tray.
-  for (const name of ['tray.ico', 'tray.png', 'icon.ico']) {
+  for (const name of iconNames) {
     const iconPath = path.resolve(app.getAppPath(), 'build', name);
     if (fs.existsSync(iconPath)) {
       const icon = nativeImage.createFromPath(iconPath);
@@ -158,6 +158,7 @@ async function registerShellControls(): Promise<void> {
     }
     tray = new Tray(trayIcon);
     tray.setToolTip('Recall');
+    tray.on('click', showWindow);
     tray.setContextMenu(
       Menu.buildFromTemplate([
         {
@@ -221,6 +222,10 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   hideWindow();
+});
+
+app.on('activate', () => {
+  showWindow();
 });
 
 app.on('before-quit', (event) => {

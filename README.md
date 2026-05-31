@@ -8,6 +8,8 @@
 
 技术栈：**Electron + React**（桌面壳层）+ **Go**（核心引擎）+ **SQLite FTS5**（全文检索）。
 
+支持平台：Windows 与 macOS。
+
 ## 演示
 
 <!-- 替换为你的演示视频或截图 -->
@@ -36,25 +38,25 @@
 
 安装依赖（首次或删除 `node_modules` 后）：
 
-```powershell
+```sh
 npm ci
 ```
 
 如本地没有 lock 对应环境，可使用：
 
-```powershell
+```sh
 npm install
 ```
 
 开发模式启动：
 
-```powershell
+```sh
 npm run dev
 ```
 
 构建桌面安装包：
 
-```powershell
+```sh
 npm run dist
 ```
 
@@ -68,4 +70,4 @@ Recall 以本地数据控制为前提设计：
 
 ## 关键词
 
-`本地搜索` `文件搜索` `浏览器历史搜索` `书签管理` `个人知识管理` `PKM` `离线搜索` `隐私优先` `桌面搜索工具` `全文检索` `Electron 桌面应用` `Windows 搜索工具`
+`本地搜索` `文件搜索` `浏览器历史搜索` `书签管理` `个人知识管理` `PKM` `离线搜索` `隐私优先` `桌面搜索工具` `全文检索` `Electron 桌面应用`

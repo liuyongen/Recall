@@ -7,6 +7,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const desktopBuildDir = path.join(root, 'apps', 'desktop', 'build');
 
 const appIconSizes = [16, 24, 32, 48, 64, 128, 256];
+const macIconSizes = [16, 32, 64, 128, 256, 512, 1024];
 const trayIconSizes = [16, 20, 24, 32, 40, 48];
 const supersample = 5;
 
@@ -266,6 +267,35 @@ function encodeIco(images) {
   return Buffer.concat([header, ...images.map((image) => image.png)]);
 }
 
+function encodeIcns(images) {
+  const iconTypes = new Map([
+    [16, 'icp4'],
+    [32, 'icp5'],
+    [64, 'icp6'],
+    [128, 'ic07'],
+    [256, 'ic08'],
+    [512, 'ic09'],
+    [1024, 'ic10']
+  ]);
+  const chunks = images.map((image) => {
+    const type = iconTypes.get(image.size);
+    if (!type) {
+      throw new Error(`Unsupported ICNS icon size: ${image.size}`);
+    }
+
+    const chunk = Buffer.alloc(8 + image.png.length);
+    chunk.write(type, 0, 4, 'ascii');
+    chunk.writeUInt32BE(chunk.length, 4);
+    image.png.copy(chunk, 8);
+    return chunk;
+  });
+  const totalLength = 8 + chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const header = Buffer.alloc(8);
+  header.write('icns', 0, 4, 'ascii');
+  header.writeUInt32BE(totalLength, 4);
+  return Buffer.concat([header, ...chunks], totalLength);
+}
+
 function writePng(name, size, renderer) {
   const rgba = renderer(size);
   const png = encodePng(size, size, rgba);
@@ -281,9 +311,18 @@ function writeIco(name, sizes, renderer) {
   fs.writeFileSync(path.join(desktopBuildDir, name), encodeIco(images));
 }
 
+function writeIcns(name, sizes, renderer) {
+  const images = sizes.map((size) => ({
+    size,
+    png: encodePng(size, size, renderer(size))
+  }));
+  fs.writeFileSync(path.join(desktopBuildDir, name), encodeIcns(images));
+}
+
 assertTrayMatchesMainShape();
 
 writeIco('icon.ico', appIconSizes, renderAppIcon);
+writeIcns('icon.icns', macIconSizes, renderAppIcon);
 writeIco('tray.ico', trayIconSizes, renderTrayIcon);
 writePng('tray.png', 32, renderTrayIcon);
 

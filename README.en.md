@@ -6,6 +6,8 @@
 
 Built with **Electron + React** (UI) and a **Go** core backed by **SQLite FTS5** full-text search.
 
+Supported platforms: Windows and macOS.
+
 ## Why Recall
 
 - Local-first by design: no cloud dependency for core search
@@ -29,25 +31,25 @@ Prerequisites:
 
 Install dependencies (first run or after removing `node_modules`):
 
-```powershell
+```sh
 npm ci
 ```
 
 If your local lockfile environment differs, use:
 
-```powershell
+```sh
 npm install
 ```
 
 Run in development:
 
-```powershell
+```sh
 npm run dev
 ```
 
 Build desktop package:
 
-```powershell
+```sh
 npm run dist
 ```
 
