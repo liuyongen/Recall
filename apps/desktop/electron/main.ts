@@ -42,10 +42,10 @@ function resolveTrayIcon(): NativeImage {
     return nativeImage.createEmpty();
   }
 
-  // Prefer a dedicated transparent tray PNG, fall back to the app ICO.
+  // Prefer a dedicated transparent multi-size tray icon, fall back to PNG/app ICO.
   // Avoid app.getFileIcon() — it wraps the icon with Windows shell decoration
   // (opaque background) which produces a gray border in the system tray.
-  for (const name of ['tray.png', 'icon.ico']) {
+  for (const name of ['tray.ico', 'tray.png', 'icon.ico']) {
     const iconPath = path.resolve(app.getAppPath(), 'build', name);
     if (fs.existsSync(iconPath)) {
       const icon = nativeImage.createFromPath(iconPath);
