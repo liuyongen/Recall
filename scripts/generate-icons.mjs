@@ -8,187 +8,94 @@ const desktopBuildDir = path.join(root, 'apps', 'desktop', 'build');
 
 const appIconSizes = [16, 24, 32, 48, 64, 128, 256];
 const trayIconSizes = [16, 20, 24, 32, 40, 48];
-const supersample = 4;
+const legacyMainIconPngBase64 =
+  'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAABGUlEQVR42u1XWw4DIQjk6BzNm9nYhixSYQcfSZvsJvxsUAYcByQiqogxcz3hSwnHU7Yli5WK/GgF/gAAv0u74ajmzryUUuXLrjX+88SSr4FZqMQau8UaCJoDATipQF6mAiLNi8hZNrUma3T21uRoAC7ERBsB1EF1xr0/o9yIs49Kfb/mQ9QtAHTWbWOPKxb0NABiQc9h1tZ0QK+K8C2QoF7wqyL9P6nQEgcQInkAOm1Y0QHLdlSiRTdAYfKzn+cA7xlIRrcgBgFdOwyAqFkX8OZIetA83gOVYv1pAPpILiC9NI+6ZVqKR3oeiZPXD4B5ITcFeW2XbcfEO2J+BvgqaeKWbBnJbCfMBt82kmVF6nkXPE+zJQCnnucvO69zimWss08AAAAASUVORK5CYII=';
 
 fs.mkdirSync(desktopBuildDir, { recursive: true });
 
-function hexToRgba(hex, alpha = 255) {
-  const value = hex.replace('#', '');
-  return [
-    Number.parseInt(value.slice(0, 2), 16),
-    Number.parseInt(value.slice(2, 4), 16),
-    Number.parseInt(value.slice(4, 6), 16),
-    alpha
-  ];
-}
+function decodePng(png) {
+  let offset = 8;
+  let width = 0;
+  let height = 0;
+  const chunks = [];
 
-function createCanvas(size) {
-  const width = size * supersample;
-  const height = size * supersample;
-  return {
-    size,
-    width,
-    height,
-    data: new Uint8ClampedArray(width * height * 4)
-  };
-}
-
-function blendPixel(canvas, x, y, color) {
-  if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height || color[3] <= 0) {
-    return;
-  }
-
-  const offset = (y * canvas.width + x) * 4;
-  const srcA = color[3] / 255;
-  const dstA = canvas.data[offset + 3] / 255;
-  const outA = srcA + dstA * (1 - srcA);
-
-  if (outA <= 0) {
-    return;
-  }
-
-  canvas.data[offset] = Math.round((color[0] * srcA + canvas.data[offset] * dstA * (1 - srcA)) / outA);
-  canvas.data[offset + 1] = Math.round((color[1] * srcA + canvas.data[offset + 1] * dstA * (1 - srcA)) / outA);
-  canvas.data[offset + 2] = Math.round((color[2] * srcA + canvas.data[offset + 2] * dstA * (1 - srcA)) / outA);
-  canvas.data[offset + 3] = Math.round(outA * 255);
-}
-
-function drawShape(canvas, color, contains) {
-  for (let y = 0; y < canvas.height; y += 1) {
-    for (let x = 0; x < canvas.width; x += 1) {
-      const ux = (x + 0.5) / supersample;
-      const uy = (y + 0.5) / supersample;
-      if (contains(ux, uy, canvas.size)) {
-        blendPixel(canvas, x, y, color);
+  while (offset < png.length) {
+    const length = png.readUInt32BE(offset);
+    const type = png.slice(offset + 4, offset + 8).toString('ascii');
+    const data = png.slice(offset + 8, offset + 8 + length);
+    if (type === 'IHDR') {
+      width = data.readUInt32BE(0);
+      height = data.readUInt32BE(4);
+      if (data[8] !== 8 || data[9] !== 6) {
+        throw new Error('Source icon PNG must be 8-bit RGBA.');
       }
+    } else if (type === 'IDAT') {
+      chunks.push(data);
     }
-  }
-}
-
-function drawEllipseStroke(canvas, options) {
-  const { cx, cy, rx, ry, angle, stroke, color } = options;
-  const cos = Math.cos(angle);
-  const sin = Math.sin(angle);
-  const strokeWidth = stroke / ((rx + ry) / 2);
-
-  drawShape(canvas, color, (x, y) => {
-    const dx = x - cx;
-    const dy = y - cy;
-    const localX = (dx * cos + dy * sin) / rx;
-    const localY = (-dx * sin + dy * cos) / ry;
-    return Math.abs(Math.hypot(localX, localY) - 1) <= strokeWidth / 2;
-  });
-}
-
-function pointOnEllipse(cx, cy, rx, ry, angle, phase) {
-  const cos = Math.cos(angle);
-  const sin = Math.sin(angle);
-  const x = rx * Math.cos(phase);
-  const y = ry * Math.sin(phase);
-  return [cx + x * cos - y * sin, cy + x * sin + y * cos];
-}
-
-function drawAtom(canvas, palette) {
-  const { size } = canvas;
-  const cx = size / 2;
-  const cy = size / 2;
-  const rx = size * 0.36;
-  const ry = size * 0.135;
-  const stroke = Math.max(1.15, size * 0.055);
-  const orbitAngles = [0, Math.PI / 3, -Math.PI / 3];
-
-  for (const angle of orbitAngles) {
-    drawEllipseStroke(canvas, {
-      cx,
-      cy,
-      rx,
-      ry,
-      angle,
-      stroke,
-      color: palette.orbitShadow
-    });
+    offset += length + 12;
   }
 
-  for (const angle of orbitAngles) {
-    drawEllipseStroke(canvas, {
-      cx,
-      cy,
-      rx,
-      ry,
-      angle,
-      stroke: stroke * 0.68,
-      color: palette.orbit
-    });
+  const raw = zlib.inflateSync(Buffer.concat(chunks));
+  const rgba = Buffer.alloc(width * height * 4);
+  const stride = width * 4;
+  let source = 0;
+
+  for (let y = 0; y < height; y += 1) {
+    const filter = raw[source];
+    if (filter !== 0) {
+      throw new Error(`Unsupported PNG filter in source icon: ${filter}`);
+    }
+    source += 1;
+    raw.copy(rgba, y * stride, source, source + stride);
+    source += stride;
   }
 
-  const electronRadius = Math.max(1.2, size * 0.052);
-  const electronPhases = [0.18 * Math.PI, 0.86 * Math.PI, 1.53 * Math.PI];
-  if (size >= 20) {
-    orbitAngles.forEach((angle, index) => {
-      const [x, y] = pointOnEllipse(cx, cy, rx, ry, angle, electronPhases[index]);
-      drawShape(canvas, palette.electron, (px, py) => Math.hypot(px - x, py - y) <= electronRadius);
-    });
-  }
-
-  drawShape(canvas, palette.core, (x, y) => Math.hypot(x - cx, y - cy) <= Math.max(1.8, size * 0.088));
+  return { width, height, rgba };
 }
 
-function renderAppIcon(size) {
-  const canvas = createCanvas(size);
-  drawAtom(canvas, {
-    orbitShadow: hexToRgba('#94A3B8', 210),
-    orbit: hexToRgba('#F8FAFC', 255),
-    electron: hexToRgba('#38BDF8', 245),
-    core: hexToRgba('#22D3EE', 255)
-  });
-  return downsample(canvas);
-}
+const legacyMainIcon = decodePng(Buffer.from(legacyMainIconPngBase64, 'base64'));
 
-function renderTrayIcon(size) {
-  const canvas = createCanvas(size);
-  drawAtom(canvas, {
-    orbitShadow: hexToRgba('#94A3B8', 205),
-    orbit: hexToRgba('#F8FAFC', 255),
-    electron: hexToRgba('#E2E8F0', 245),
-    core: hexToRgba('#F8FAFC', 255)
-  });
-  return downsample(canvas);
-}
-
-function downsample(canvas) {
-  const { size, data, width } = canvas;
+function resizeNearest(image, size) {
   const output = Buffer.alloc(size * size * 4);
-  const samples = supersample * supersample;
 
   for (let y = 0; y < size; y += 1) {
+    const sourceY = Math.min(image.height - 1, Math.floor((y * image.height) / size));
     for (let x = 0; x < size; x += 1) {
-      let r = 0;
-      let g = 0;
-      let b = 0;
-      let a = 0;
-
-      for (let sy = 0; sy < supersample; sy += 1) {
-        for (let sx = 0; sx < supersample; sx += 1) {
-          const source = (((y * supersample + sy) * width) + x * supersample + sx) * 4;
-          const alpha = data[source + 3] / 255;
-          r += data[source] * alpha;
-          g += data[source + 1] * alpha;
-          b += data[source + 2] * alpha;
-          a += alpha;
-        }
-      }
-
+      const sourceX = Math.min(image.width - 1, Math.floor((x * image.width) / size));
+      const source = (sourceY * image.width + sourceX) * 4;
       const target = (y * size + x) * 4;
-      if (a > 0) {
-        output[target] = Math.round(r / a);
-        output[target + 1] = Math.round(g / a);
-        output[target + 2] = Math.round(b / a);
-      }
-      output[target + 3] = Math.round((a / samples) * 255);
+      image.rgba.copy(output, target, source, source + 4);
     }
   }
 
   return output;
+}
+
+function applyRoundedMask(rgba, size) {
+  const output = Buffer.from(rgba);
+  const radius = size * 0.24;
+  const min = 0;
+  const max = size - 1;
+
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const cx = Math.max(min + radius, Math.min(x, max - radius));
+      const cy = Math.max(min + radius, Math.min(y, max - radius));
+      if (Math.hypot(x - cx, y - cy) > radius) {
+        output[(y * size + x) * 4 + 3] = 0;
+      }
+    }
+  }
+
+  return output;
+}
+
+function renderAppIcon(size) {
+  return applyRoundedMask(resizeNearest(legacyMainIcon, size), size);
+}
+
+function renderTrayIcon(size) {
+  return renderAppIcon(size);
 }
 
 function crc32(buffer) {
