@@ -90,12 +90,106 @@ function applyRoundedMask(rgba, size) {
   return output;
 }
 
+function boostIconContrast(rgba) {
+  const output = Buffer.from(rgba);
+
+  for (let offset = 0; offset < output.length; offset += 4) {
+    const red = output[offset];
+    const green = output[offset + 1];
+    const blue = output[offset + 2];
+    const alpha = output[offset + 3];
+
+    if (alpha === 0 || (red < 24 && green < 24 && blue < 24)) {
+      continue;
+    }
+
+    if (blue > 90 && red < 32) {
+      output[offset] = 34;
+      output[offset + 1] = 211;
+      output[offset + 2] = 238;
+    } else {
+      output[offset] = 248;
+      output[offset + 1] = 250;
+      output[offset + 2] = 252;
+    }
+    output[offset + 3] = 255;
+  }
+
+  return output;
+}
+
+function renderMainIcon(size) {
+  return boostIconContrast(applyRoundedMask(resizeNearest(legacyMainIcon, size), size));
+}
+
 function renderAppIcon(size) {
-  return applyRoundedMask(resizeNearest(legacyMainIcon, size), size);
+  return renderMainIcon(size);
+}
+
+function drawPixelShape(size, rgba, color, contains) {
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      if (!contains(x + 0.5, y + 0.5)) {
+        continue;
+      }
+
+      const offset = (y * size + x) * 4;
+      rgba[offset] = color[0];
+      rgba[offset + 1] = color[1];
+      rgba[offset + 2] = color[2];
+      rgba[offset + 3] = color[3];
+    }
+  }
+}
+
+function drawPixelEllipse(size, rgba, angle, color) {
+  const cx = size / 2;
+  const cy = size / 2;
+  const rx = size * 0.34;
+  const ry = size * 0.13;
+  const stroke = Math.max(0.92, size * 0.055);
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const strokeWidth = stroke / ((rx + ry) / 2);
+
+  drawPixelShape(size, rgba, color, (x, y) => {
+    const dx = x - cx;
+    const dy = y - cy;
+    const localX = (dx * cos + dy * sin) / rx;
+    const localY = (-dx * sin + dy * cos) / ry;
+    return Math.abs(Math.hypot(localX, localY) - 1) <= strokeWidth / 2;
+  });
+}
+
+function renderSmallTrayIcon(size) {
+  const rgba = Buffer.alloc(size * size * 4);
+  const radius = size * 0.24;
+  const max = size - 1;
+
+  drawPixelShape(size, rgba, [0, 0, 0, 255], (x, y) => {
+    const cx = Math.max(radius, Math.min(x, max - radius));
+    const cy = Math.max(radius, Math.min(y, max - radius));
+    return Math.hypot(x - cx, y - cy) <= radius;
+  });
+
+  for (const angle of [0, Math.PI / 3, -Math.PI / 3]) {
+    drawPixelEllipse(size, rgba, angle, [248, 250, 252, 255]);
+  }
+
+  const dotRadius = Math.max(1.2, size * 0.09);
+  drawPixelShape(size, rgba, [34, 211, 238, 255], (x, y) => {
+    return Math.hypot(x - size / 2, y - size / 2) <= dotRadius;
+  });
+
+  return rgba;
 }
 
 function renderTrayIcon(size) {
-  return renderAppIcon(size);
+  if (size <= 24) {
+    return renderSmallTrayIcon(size);
+  }
+
+  return renderMainIcon(size);
 }
 
 function crc32(buffer) {
