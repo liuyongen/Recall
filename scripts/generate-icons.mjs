@@ -8,188 +8,191 @@ const desktopBuildDir = path.join(root, 'apps', 'desktop', 'build');
 
 const appIconSizes = [16, 24, 32, 48, 64, 128, 256];
 const trayIconSizes = [16, 20, 24, 32, 40, 48];
-const legacyMainIconPngBase64 =
-  'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAABGUlEQVR42u1XWw4DIQjk6BzNm9nYhixSYQcfSZvsJvxsUAYcByQiqogxcz3hSwnHU7Yli5WK/GgF/gAAv0u74ajmzryUUuXLrjX+88SSr4FZqMQau8UaCJoDATipQF6mAiLNi8hZNrUma3T21uRoAC7ERBsB1EF1xr0/o9yIs49Kfb/mQ9QtAHTWbWOPKxb0NABiQc9h1tZ0QK+K8C2QoF7wqyL9P6nQEgcQInkAOm1Y0QHLdlSiRTdAYfKzn+cA7xlIRrcgBgFdOwyAqFkX8OZIetA83gOVYv1pAPpILiC9NI+6ZVqKR3oeiZPXD4B5ITcFeW2XbcfEO2J+BvgqaeKWbBnJbCfMBt82kmVF6nkXPE+zJQCnnucvO69zimWss08AAAAASUVORK5CYII=';
+const supersample = 5;
 
 fs.mkdirSync(desktopBuildDir, { recursive: true });
 
-function decodePng(png) {
-  let offset = 8;
-  let width = 0;
-  let height = 0;
-  const chunks = [];
-
-  while (offset < png.length) {
-    const length = png.readUInt32BE(offset);
-    const type = png.slice(offset + 4, offset + 8).toString('ascii');
-    const data = png.slice(offset + 8, offset + 8 + length);
-    if (type === 'IHDR') {
-      width = data.readUInt32BE(0);
-      height = data.readUInt32BE(4);
-      if (data[8] !== 8 || data[9] !== 6) {
-        throw new Error('Source icon PNG must be 8-bit RGBA.');
-      }
-    } else if (type === 'IDAT') {
-      chunks.push(data);
-    }
-    offset += length + 12;
-  }
-
-  const raw = zlib.inflateSync(Buffer.concat(chunks));
-  const rgba = Buffer.alloc(width * height * 4);
-  const stride = width * 4;
-  let source = 0;
-
-  for (let y = 0; y < height; y += 1) {
-    const filter = raw[source];
-    if (filter !== 0) {
-      throw new Error(`Unsupported PNG filter in source icon: ${filter}`);
-    }
-    source += 1;
-    raw.copy(rgba, y * stride, source, source + stride);
-    source += stride;
-  }
-
-  return { width, height, rgba };
+function rgba(hex, alpha = 255) {
+  const value = hex.replace('#', '');
+  return [
+    Number.parseInt(value.slice(0, 2), 16),
+    Number.parseInt(value.slice(2, 4), 16),
+    Number.parseInt(value.slice(4, 6), 16),
+    alpha
+  ];
 }
 
-const legacyMainIcon = decodePng(Buffer.from(legacyMainIconPngBase64, 'base64'));
-
-function resizeNearest(image, size) {
-  const output = Buffer.alloc(size * size * 4);
-
-  for (let y = 0; y < size; y += 1) {
-    const sourceY = Math.min(image.height - 1, Math.floor((y * image.height) / size));
-    for (let x = 0; x < size; x += 1) {
-      const sourceX = Math.min(image.width - 1, Math.floor((x * image.width) / size));
-      const source = (sourceY * image.width + sourceX) * 4;
-      const target = (y * size + x) * 4;
-      image.rgba.copy(output, target, source, source + 4);
-    }
-  }
-
-  return output;
+function createCanvas(size) {
+  return {
+    size,
+    width: size * supersample,
+    height: size * supersample,
+    data: new Uint8ClampedArray(size * supersample * size * supersample * 4)
+  };
 }
 
-function applyRoundedMask(rgba, size) {
-  const output = Buffer.from(rgba);
-  const radius = size * 0.24;
-  const min = 0;
-  const max = size - 1;
+function blendPixel(canvas, x, y, color) {
+  if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height || color[3] <= 0) {
+    return;
+  }
 
-  for (let y = 0; y < size; y += 1) {
-    for (let x = 0; x < size; x += 1) {
-      const cx = Math.max(min + radius, Math.min(x, max - radius));
-      const cy = Math.max(min + radius, Math.min(y, max - radius));
-      if (Math.hypot(x - cx, y - cy) > radius) {
-        output[(y * size + x) * 4 + 3] = 0;
+  const offset = (y * canvas.width + x) * 4;
+  const sourceAlpha = color[3] / 255;
+  const targetAlpha = canvas.data[offset + 3] / 255;
+  const outputAlpha = sourceAlpha + targetAlpha * (1 - sourceAlpha);
+
+  if (outputAlpha <= 0) {
+    return;
+  }
+
+  canvas.data[offset] = Math.round((color[0] * sourceAlpha + canvas.data[offset] * targetAlpha * (1 - sourceAlpha)) / outputAlpha);
+  canvas.data[offset + 1] = Math.round((color[1] * sourceAlpha + canvas.data[offset + 1] * targetAlpha * (1 - sourceAlpha)) / outputAlpha);
+  canvas.data[offset + 2] = Math.round((color[2] * sourceAlpha + canvas.data[offset + 2] * targetAlpha * (1 - sourceAlpha)) / outputAlpha);
+  canvas.data[offset + 3] = Math.round(outputAlpha * 255);
+}
+
+function fillShape(canvas, color, contains) {
+  for (let y = 0; y < canvas.height; y += 1) {
+    for (let x = 0; x < canvas.width; x += 1) {
+      const unitX = (x + 0.5) / supersample;
+      const unitY = (y + 0.5) / supersample;
+      if (contains(unitX, unitY, canvas.size)) {
+        blendPixel(canvas, x, y, color);
       }
     }
   }
+}
+
+function fillRoundedRect(canvas, inset, radius, color) {
+  fillShape(canvas, color, (x, y, size) => {
+    const min = inset;
+    const max = size - inset;
+    const closestX = Math.max(min + radius, Math.min(x, max - radius));
+    const closestY = Math.max(min + radius, Math.min(y, max - radius));
+    return Math.hypot(x - closestX, y - closestY) <= radius;
+  });
+}
+
+function strokeEllipse(canvas, options) {
+  const { cx, cy, rx, ry, angle, width, color } = options;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const normalizedWidth = width / ((rx + ry) / 2);
+
+  fillShape(canvas, color, (x, y) => {
+    const dx = x - cx;
+    const dy = y - cy;
+    const localX = (dx * cos + dy * sin) / rx;
+    const localY = (-dx * sin + dy * cos) / ry;
+    return Math.abs(Math.hypot(localX, localY) - 1) <= normalizedWidth / 2;
+  });
+}
+
+function downsample(canvas) {
+  const output = Buffer.alloc(canvas.size * canvas.size * 4);
+  const samples = supersample * supersample;
+
+  for (let y = 0; y < canvas.size; y += 1) {
+    for (let x = 0; x < canvas.size; x += 1) {
+      let red = 0;
+      let green = 0;
+      let blue = 0;
+      let alpha = 0;
+
+      for (let sampleY = 0; sampleY < supersample; sampleY += 1) {
+        for (let sampleX = 0; sampleX < supersample; sampleX += 1) {
+          const source = (((y * supersample + sampleY) * canvas.width) + x * supersample + sampleX) * 4;
+          const sampleAlpha = canvas.data[source + 3] / 255;
+          red += canvas.data[source] * sampleAlpha;
+          green += canvas.data[source + 1] * sampleAlpha;
+          blue += canvas.data[source + 2] * sampleAlpha;
+          alpha += sampleAlpha;
+        }
+      }
+
+      const target = (y * canvas.size + x) * 4;
+      if (alpha > 0) {
+        output[target] = Math.round(red / alpha);
+        output[target + 1] = Math.round(green / alpha);
+        output[target + 2] = Math.round(blue / alpha);
+      }
+      output[target + 3] = Math.round((alpha / samples) * 255);
+    }
+  }
 
   return output;
 }
 
-function boostIconContrast(rgba) {
-  const output = Buffer.from(rgba);
+function renderRecallMark(canvas, options = {}) {
+  const {
+    scale = 1,
+    strokeScale = 1,
+    shadow = true,
+    centerColor = rgba('#21C7D9')
+  } = options;
+  const size = canvas.size;
+  const cx = size * 0.5;
+  const cy = size * 0.5;
+  const orbitRx = size * 0.315 * scale;
+  const orbitRy = size * 0.128 * scale;
+  const orbitWidth = Math.max(1.15, size * 0.058 * strokeScale);
+  const dotRadius = Math.max(0.9, size * 0.06 * scale);
+  const orbitAngles = [0, Math.PI / 3, -Math.PI / 3];
 
-  for (let offset = 0; offset < output.length; offset += 4) {
-    const red = output[offset];
-    const green = output[offset + 1];
-    const blue = output[offset + 2];
-    const alpha = output[offset + 3];
-
-    if (alpha === 0 || (red < 24 && green < 24 && blue < 24)) {
-      continue;
+  if (shadow) {
+    for (const angle of orbitAngles) {
+      strokeEllipse(canvas, {
+        cx,
+        cy,
+        rx: orbitRx,
+        ry: orbitRy,
+        angle,
+        width: orbitWidth * 1.58,
+        color: rgba('#374151', 230)
+      });
     }
-
-    if (blue > 90 && red < 32) {
-      output[offset] = 34;
-      output[offset + 1] = 211;
-      output[offset + 2] = 238;
-    } else {
-      output[offset] = 248;
-      output[offset + 1] = 250;
-      output[offset + 2] = 252;
-    }
-    output[offset + 3] = 255;
   }
 
-  return output;
+  for (const angle of orbitAngles) {
+    strokeEllipse(canvas, {
+      cx,
+      cy,
+      rx: orbitRx,
+      ry: orbitRy,
+      angle,
+      width: orbitWidth,
+      color: rgba('#F8FAFC')
+    });
+  }
+
+  fillShape(canvas, centerColor, (x, y) => Math.hypot(x - cx, y - cy) <= dotRadius);
 }
 
 function renderMainIcon(size) {
-  return boostIconContrast(applyRoundedMask(resizeNearest(legacyMainIcon, size), size));
+  const canvas = createCanvas(size);
+  const inset = size <= 24 ? 1 : size * 0.045;
+  const radius = size * 0.24;
+
+  fillRoundedRect(canvas, inset, radius, rgba('#05070A'));
+  renderRecallMark(canvas);
+
+  return downsample(canvas);
 }
 
 function renderAppIcon(size) {
   return renderMainIcon(size);
 }
 
-function drawPixelShape(size, rgba, color, contains) {
-  for (let y = 0; y < size; y += 1) {
-    for (let x = 0; x < size; x += 1) {
-      if (!contains(x + 0.5, y + 0.5)) {
-        continue;
-      }
-
-      const offset = (y * size + x) * 4;
-      rgba[offset] = color[0];
-      rgba[offset + 1] = color[1];
-      rgba[offset + 2] = color[2];
-      rgba[offset + 3] = color[3];
-    }
-  }
-}
-
-function drawPixelEllipse(size, rgba, angle, color) {
-  const cx = size / 2;
-  const cy = size / 2;
-  const rx = size * 0.34;
-  const ry = size * 0.13;
-  const stroke = Math.max(0.92, size * 0.055);
-  const cos = Math.cos(angle);
-  const sin = Math.sin(angle);
-  const strokeWidth = stroke / ((rx + ry) / 2);
-
-  drawPixelShape(size, rgba, color, (x, y) => {
-    const dx = x - cx;
-    const dy = y - cy;
-    const localX = (dx * cos + dy * sin) / rx;
-    const localY = (-dx * sin + dy * cos) / ry;
-    return Math.abs(Math.hypot(localX, localY) - 1) <= strokeWidth / 2;
-  });
-}
-
-function renderSmallTrayIcon(size) {
-  const rgba = Buffer.alloc(size * size * 4);
-  const radius = size * 0.24;
-  const max = size - 1;
-
-  drawPixelShape(size, rgba, [0, 0, 0, 255], (x, y) => {
-    const cx = Math.max(radius, Math.min(x, max - radius));
-    const cy = Math.max(radius, Math.min(y, max - radius));
-    return Math.hypot(x - cx, y - cy) <= radius;
-  });
-
-  for (const angle of [0, Math.PI / 3, -Math.PI / 3]) {
-    drawPixelEllipse(size, rgba, angle, [248, 250, 252, 255]);
-  }
-
-  const dotRadius = Math.max(1.2, size * 0.09);
-  drawPixelShape(size, rgba, [34, 211, 238, 255], (x, y) => {
-    return Math.hypot(x - size / 2, y - size / 2) <= dotRadius;
-  });
-
-  return rgba;
-}
-
 function renderTrayIcon(size) {
-  if (size <= 24) {
-    return renderSmallTrayIcon(size);
-  }
-
   return renderMainIcon(size);
+}
+
+function assertTrayMatchesMainShape() {
+  const main = renderAppIcon(32);
+  const tray = renderTrayIcon(32);
+  if (!main.equals(tray)) {
+    throw new Error('Tray icon must be pixel-identical to the 32px main icon.');
+  }
 }
 
 function crc32(buffer) {
@@ -277,6 +280,8 @@ function writeIco(name, sizes, renderer) {
   }));
   fs.writeFileSync(path.join(desktopBuildDir, name), encodeIco(images));
 }
+
+assertTrayMatchesMainShape();
 
 writeIco('icon.ico', appIconSizes, renderAppIcon);
 writeIco('tray.ico', trayIconSizes, renderTrayIcon);
